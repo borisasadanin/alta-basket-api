@@ -7,13 +7,15 @@ import type { CreateStreamBody, StreamInfo } from "./types.js";
 // --- Config ---
 
 const PORT = parseInt(process.env.PORT || "8000", 10);
-const API_KEY = process.env.API_KEY || "";
-const RESTREAMER_URL = process.env.RESTREAMER_URL || "";
-const RTMP_HOST = process.env.RTMP_HOST || "";
+const API_KEY = process.env.API_KEY || "alta-basket-2026";
+const RESTREAMER_URL =
+  process.env.RESTREAMER_URL ||
+  "https://eyevinnlab-restreamerlive.datarhei-restreamer.auto.prod.osaas.io";
+const RTMP_HOST = process.env.RTMP_HOST || "172.232.131.169:10537";
 const OSC_PAT = process.env.OSC_ACCESS_TOKEN || "";
 
-if (!RESTREAMER_URL || !OSC_PAT || !RTMP_HOST) {
-  console.error("Missing RESTREAMER_URL, RTMP_HOST, or OSC_ACCESS_TOKEN");
+if (!OSC_PAT) {
+  console.error("Missing OSC_ACCESS_TOKEN");
   process.exit(1);
 }
 
