@@ -98,7 +98,7 @@ export class RestreamerClient {
       input: [
         {
           id: "input",
-          address: `{rtmp,name=${streamId}}`,
+          address: `{rtmp,name=live/${streamId}}`,
           options: ["-f", "live_flv"],
         },
       ],
