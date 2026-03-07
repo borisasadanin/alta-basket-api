@@ -2,7 +2,7 @@ import "dotenv/config";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { RestreamerClient } from "./restreamer.js";
-import type { CreateStreamBody, StreamInfo } from "./types.js";
+import type { CreateStreamBody, StreamInfo, StreamPublicInfo } from "./types.js";
 
 // --- Config ---
 
@@ -22,6 +22,26 @@ if (!OSC_PAT) {
 // --- In-memory stream metadata (name + createdAt) ---
 
 const streamMeta = new Map<string, { name: string; createdAt: string }>();
+
+// --- Viewer tracking: streamId -> Map<ip, lastSeenTimestamp> ---
+
+const viewers = new Map<string, Map<string, number>>();
+const VIEWER_TTL_MS = 60_000; // 60s without heartbeat = viewer gone
+
+function registerViewer(streamId: string, ip: string): void {
+  if (!viewers.has(streamId)) viewers.set(streamId, new Map());
+  viewers.get(streamId)!.set(ip, Date.now());
+}
+
+function getViewerCount(streamId: string): number {
+  const map = viewers.get(streamId);
+  if (!map) return 0;
+  const now = Date.now();
+  for (const [ip, ts] of map) {
+    if (now - ts > VIEWER_TTL_MS) map.delete(ip);
+  }
+  return map.size;
+}
 
 // --- Setup ---
 
@@ -83,7 +103,7 @@ app.get("/api/streams", async (_request, reply) => {
   try {
     const processes = await restreamer.listAltaProcesses();
 
-    const streams: Omit<StreamInfo, "rtmpUrl">[] = processes.map((p) => {
+    const streams: StreamPublicInfo[] = processes.map((p) => {
       const streamId = p.config.id.replace("alta-", "");
       const meta = streamMeta.get(streamId);
       return {
@@ -91,6 +111,8 @@ app.get("/api/streams", async (_request, reply) => {
         name: meta?.name || streamId,
         hlsUrl: restreamer.hlsUrl(streamId),
         createdAt: meta?.createdAt || "",
+        status: p.state?.exec === "running" ? "live" as const : "waiting" as const,
+        viewers: getViewerCount(streamId),
       };
     });
 
@@ -113,11 +135,13 @@ app.get<{ Params: { id: string } }>(
       }
 
       const meta = streamMeta.get(id);
-      const info: Omit<StreamInfo, "rtmpUrl"> = {
+      const info: StreamPublicInfo = {
         id,
         name: meta?.name || id,
         hlsUrl: restreamer.hlsUrl(id),
         createdAt: meta?.createdAt || "",
+        status: process.state?.exec === "running" ? "live" : "waiting",
+        viewers: getViewerCount(id),
       };
 
       return reply.send(info);
@@ -145,6 +169,50 @@ app.delete<{ Params: { id: string } }>(
     }
   }
 );
+
+// POST /api/streams/:id/view — Register viewer heartbeat (no auth)
+app.post<{ Params: { id: string } }>(
+  "/api/streams/:id/view",
+  async (request, reply) => {
+    const { id } = request.params;
+    const ip = request.ip || "unknown";
+    registerViewer(id, ip);
+    return reply.code(204).send();
+  }
+);
+
+// --- Auto-cleanup of stale streams ---
+
+async function cleanupStaleStreams() {
+  try {
+    const processes = await restreamer.listAltaProcesses();
+    for (const p of processes) {
+      const state = p.state?.exec;
+      const streamId = p.config.id.replace("alta-", "");
+      const meta = streamMeta.get(streamId);
+      const ageMs = meta ? Date.now() - new Date(meta.createdAt).getTime() : 0;
+
+      // Delete finished/failed processes (RTMP timed out or errored)
+      if (state === "finished" || state === "failed") {
+        app.log.info(`Cleaning up stale stream ${streamId} (state: ${state})`);
+        await restreamer.deleteProcess(streamId);
+        streamMeta.delete(streamId);
+        viewers.delete(streamId);
+      }
+      // Delete processes stuck in "waiting" for > 10 minutes (never got RTMP input)
+      else if (state !== "running" && ageMs > 10 * 60 * 1000) {
+        app.log.info(`Cleaning up abandoned stream ${streamId} (age: ${Math.round(ageMs / 1000)}s)`);
+        await restreamer.deleteProcess(streamId);
+        streamMeta.delete(streamId);
+        viewers.delete(streamId);
+      }
+    }
+  } catch (err) {
+    app.log.error(err, "Cleanup error");
+  }
+}
+
+setInterval(cleanupStaleStreams, 60_000);
 
 // --- Health check ---
 app.get("/health", async () => ({ status: "ok" }));

@@ -6,6 +6,15 @@ export interface StreamInfo {
   createdAt: string;
 }
 
+export interface StreamPublicInfo {
+  id: string;
+  name: string;
+  hlsUrl: string;
+  createdAt: string;
+  status: "live" | "waiting";
+  viewers: number;
+}
+
 export interface CreateStreamBody {
   name: string;
 }
