@@ -2,17 +2,22 @@ import "dotenv/config";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { RestreamerClient } from "./restreamer.js";
+import { OscInstanceManager } from "./osc-manager.js";
 import type { CreateStreamBody, StreamInfo, StreamPublicInfo } from "./types.js";
 
 // --- Config ---
 
 const PORT = parseInt(process.env.PORT || "8000", 10);
 const API_KEY = process.env.API_KEY || "alta-basket-2026";
+const OSC_INSTANCE_NAME = process.env.OSC_INSTANCE_NAME || "restreamerlive";
 const RESTREAMER_URL =
   process.env.RESTREAMER_URL ||
-  "https://eyevinnlab-restreamerlive.datarhei-restreamer.auto.prod.osaas.io";
-const RTMP_HOST = process.env.RTMP_HOST || "172.232.131.169:10537";
+  `https://borispriv-${OSC_INSTANCE_NAME}.datarhei-restreamer.auto.prod.osaas.io`;
 const OSC_PAT = process.env.OSC_ACCESS_TOKEN || "";
+const RESTREAMER_GRACE_PERIOD_MS = parseInt(
+  process.env.RESTREAMER_GRACE_PERIOD_MS || String(15 * 60 * 1000),
+  10
+);
 
 if (!OSC_PAT) {
   console.error("Missing OSC_ACCESS_TOKEN");
@@ -47,7 +52,12 @@ function getViewerCount(streamId: string): number {
 // --- Setup ---
 
 const app = Fastify({ logger: true });
-const restreamer = new RestreamerClient(RESTREAMER_URL, OSC_PAT, RTMP_HOST);
+const restreamer = new RestreamerClient(RESTREAMER_URL, OSC_PAT, "");
+const oscManager = new OscInstanceManager({
+  instanceName: OSC_INSTANCE_NAME,
+  gracePeriodMs: RESTREAMER_GRACE_PERIOD_MS,
+  logger: app.log,
+});
 
 await app.register(cors, { origin: true });
 
@@ -76,6 +86,17 @@ app.post<{ Body: CreateStreamBody }>("/api/streams", async (request, reply) => {
     return reply.code(400).send({ error: 'Missing "name" field' });
   }
 
+  // Ensure Restreamer instance is running (starts it if needed)
+  try {
+    const instanceInfo = await oscManager.ensureRunning();
+    restreamer.rtmpHost = instanceInfo.rtmpHost;
+  } catch (err) {
+    request.log.error(err, "Failed to start Restreamer instance");
+    return reply.code(503).send({
+      error: "Streaming service is starting up. Please try again in a moment.",
+    });
+  }
+
   const displayName = `${name.trim()} kamera`;
 
   // If deviceId provided, look for an existing stream from this device with same name
@@ -95,6 +116,8 @@ app.post<{ Body: CreateStreamBody }>("/api/streams", async (request, reply) => {
         meta.createdAt = new Date().toISOString();
       }
 
+      oscManager.streamStarted();
+
       // Return existing stream info (whether it was stopped or still active)
       const info: StreamInfo = {
         id: existingId,
@@ -112,6 +135,8 @@ app.post<{ Body: CreateStreamBody }>("/api/streams", async (request, reply) => {
 
   try {
     await restreamer.createProcess(streamId);
+
+    oscManager.streamStarted();
 
     const info: StreamInfo = {
       id: streamId,
@@ -132,6 +157,25 @@ app.post<{ Body: CreateStreamBody }>("/api/streams", async (request, reply) => {
 
 // GET /api/streams — List active + recently stopped streams
 app.get("/api/streams", async (_request, reply) => {
+  // If Restreamer is not running, only return stopped metadata
+  if (oscManager.getState() === "stopped") {
+    const streams: StreamPublicInfo[] = [];
+    const now = Date.now();
+    for (const [streamId, meta] of streamMeta) {
+      if (!meta.stoppedAt) continue;
+      if (now - new Date(meta.stoppedAt).getTime() > STOPPED_TTL_MS) continue;
+      streams.push({
+        id: streamId,
+        name: meta.name,
+        hlsUrl: restreamer.hlsUrl(streamId),
+        createdAt: meta.createdAt,
+        status: "stopped",
+        viewers: 0,
+      });
+    }
+    return reply.send(streams);
+  }
+
   try {
     const processes = await restreamer.listAltaProcesses();
     const activeIds = new Set<string>();
@@ -235,12 +279,13 @@ app.delete<{ Params: { id: string } }>(
     const { id } = request.params;
     try {
       await restreamer.deleteProcess(id);
-      // Keep metadata with stoppedAt so it shows as "stopped" for 1h
+      // Keep metadata with stoppedAt so it shows as "stopped" for TTL
       const meta = streamMeta.get(id);
       if (meta) {
         meta.stoppedAt = new Date().toISOString();
       }
       viewers.delete(id);
+      oscManager.streamEnded();
       return reply.code(204).send();
     } catch (err) {
       request.log.error(err, "Failed to delete stream");
@@ -263,8 +308,22 @@ app.post<{ Params: { id: string } }>(
 // --- Auto-cleanup of stale streams ---
 
 async function cleanupStaleStreams() {
+  // Skip cleanup if Restreamer is not running
+  if (oscManager.getState() !== "running") {
+    // Still clean up expired metadata
+    const now = Date.now();
+    for (const [streamId, meta] of streamMeta) {
+      if (meta.stoppedAt && now - new Date(meta.stoppedAt).getTime() > STOPPED_TTL_MS) {
+        streamMeta.delete(streamId);
+      }
+    }
+    return;
+  }
+
   try {
     const processes = await restreamer.listAltaProcesses();
+    let activeCount = 0;
+
     for (const p of processes) {
       const state = p.state?.exec;
       const streamId = p.config.id.replace("alta-", "");
@@ -288,10 +347,16 @@ async function cleanupStaleStreams() {
           meta.stoppedAt = new Date().toISOString();
         }
         viewers.delete(streamId);
+      } else {
+        // Still active
+        activeCount++;
       }
     }
 
-    // Remove stopped metadata older than 1 hour
+    // Sync the manager's active stream count with reality
+    oscManager.syncActiveCount(activeCount);
+
+    // Remove stopped metadata older than TTL
     const now = Date.now();
     for (const [streamId, meta] of streamMeta) {
       if (meta.stoppedAt && now - new Date(meta.stoppedAt).getTime() > STOPPED_TTL_MS) {
@@ -304,6 +369,42 @@ async function cleanupStaleStreams() {
 }
 
 setInterval(cleanupStaleStreams, 60_000);
+
+// --- Restreamer admin routes ---
+
+// GET /api/restreamer/status — Check Restreamer instance state
+app.get("/api/restreamer/status", async (request, reply) => {
+  if (!requireApiKey(request, reply)) return;
+  return reply.send({
+    state: oscManager.getState(),
+    info: oscManager.getInfo(),
+  });
+});
+
+// POST /api/restreamer/start — Force-start Restreamer instance
+app.post("/api/restreamer/start", async (request, reply) => {
+  if (!requireApiKey(request, reply)) return;
+  try {
+    const info = await oscManager.ensureRunning();
+    restreamer.rtmpHost = info.rtmpHost;
+    return reply.send({ state: "running", info });
+  } catch (err) {
+    request.log.error(err, "Failed to start Restreamer");
+    return reply.code(500).send({ error: "Failed to start Restreamer" });
+  }
+});
+
+// DELETE /api/restreamer/stop — Force-stop Restreamer instance
+app.delete("/api/restreamer/stop", async (request, reply) => {
+  if (!requireApiKey(request, reply)) return;
+  try {
+    await oscManager.forceStop();
+    return reply.code(204).send();
+  } catch (err) {
+    request.log.error(err, "Failed to stop Restreamer");
+    return reply.code(500).send({ error: "Failed to stop Restreamer" });
+  }
+});
 
 // --- Health check ---
 app.get("/health", async () => ({ status: "ok" }));

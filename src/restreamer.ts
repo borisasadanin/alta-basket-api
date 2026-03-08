@@ -7,7 +7,7 @@ const SAT_SERVICE_ID = "datarhei-restreamer";
 export class RestreamerClient {
   private baseUrl: string;
   private oscPat: string;
-  private rtmpHost: string;
+  public rtmpHost: string;
   private sat: string | null = null;
   private satExpiry = 0;
 
