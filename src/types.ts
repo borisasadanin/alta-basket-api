@@ -11,7 +11,7 @@ export interface StreamPublicInfo {
   name: string;
   hlsUrl: string;
   createdAt: string;
-  status: "live" | "waiting";
+  status: "live" | "waiting" | "stopped";
   viewers: number;
 }
 

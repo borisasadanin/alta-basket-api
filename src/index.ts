@@ -19,9 +19,10 @@ if (!OSC_PAT) {
   process.exit(1);
 }
 
-// --- In-memory stream metadata (name + createdAt) ---
+// --- In-memory stream metadata ---
 
-const streamMeta = new Map<string, { name: string; createdAt: string }>();
+const STOPPED_TTL_MS = 60 * 60 * 1000; // 1 hour
+const streamMeta = new Map<string, { name: string; createdAt: string; stoppedAt?: string }>();
 
 // --- Viewer tracking: streamId -> Map<ip, lastSeenTimestamp> ---
 
@@ -98,14 +99,21 @@ app.post<{ Body: CreateStreamBody }>("/api/streams", async (request, reply) => {
   }
 });
 
-// GET /api/streams — List active streams
+// GET /api/streams — List active + recently stopped streams
 app.get("/api/streams", async (_request, reply) => {
   try {
     const processes = await restreamer.listAltaProcesses();
+    const activeIds = new Set<string>();
 
+    // Active streams (from Restreamer)
     const streams: StreamPublicInfo[] = processes.map((p) => {
       const streamId = p.config.id.replace("alta-", "");
+      activeIds.add(streamId);
       const meta = streamMeta.get(streamId);
+      // If it was previously stopped but process exists again, clear stoppedAt
+      if (meta?.stoppedAt) {
+        meta.stoppedAt = undefined;
+      }
       return {
         id: streamId,
         name: meta?.name || streamId,
@@ -115,6 +123,21 @@ app.get("/api/streams", async (_request, reply) => {
         viewers: getViewerCount(streamId),
       };
     });
+
+    // Stopped streams (metadata with stoppedAt, within 1h)
+    const now = Date.now();
+    for (const [streamId, meta] of streamMeta) {
+      if (activeIds.has(streamId) || !meta.stoppedAt) continue;
+      if (now - new Date(meta.stoppedAt).getTime() > STOPPED_TTL_MS) continue;
+      streams.push({
+        id: streamId,
+        name: meta.name,
+        hlsUrl: restreamer.hlsUrl(streamId),
+        createdAt: meta.createdAt,
+        status: "stopped",
+        viewers: 0,
+      });
+    }
 
     return reply.send(streams);
   } catch (err) {
@@ -129,12 +152,29 @@ app.get<{ Params: { id: string } }>(
   async (request, reply) => {
     const { id } = request.params;
     try {
+      const meta = streamMeta.get(id);
+
+      // Check if stopped (within TTL)
+      if (meta?.stoppedAt) {
+        const age = Date.now() - new Date(meta.stoppedAt).getTime();
+        if (age <= STOPPED_TTL_MS) {
+          return reply.send({
+            id,
+            name: meta.name,
+            hlsUrl: restreamer.hlsUrl(id),
+            createdAt: meta.createdAt,
+            status: "stopped",
+            viewers: 0,
+          } satisfies StreamPublicInfo);
+        }
+        return reply.code(404).send({ error: "Stream not found" });
+      }
+
       const process = await restreamer.getProcess(id);
       if (!process) {
         return reply.code(404).send({ error: "Stream not found" });
       }
 
-      const meta = streamMeta.get(id);
       const info: StreamPublicInfo = {
         id,
         name: meta?.name || id,
@@ -152,7 +192,7 @@ app.get<{ Params: { id: string } }>(
   }
 );
 
-// DELETE /api/streams/:id — Stop and remove a stream
+// DELETE /api/streams/:id — Stop stream (keep metadata for 1h)
 app.delete<{ Params: { id: string } }>(
   "/api/streams/:id",
   async (request, reply) => {
@@ -161,7 +201,12 @@ app.delete<{ Params: { id: string } }>(
     const { id } = request.params;
     try {
       await restreamer.deleteProcess(id);
-      streamMeta.delete(id);
+      // Keep metadata with stoppedAt so it shows as "stopped" for 1h
+      const meta = streamMeta.get(id);
+      if (meta) {
+        meta.stoppedAt = new Date().toISOString();
+      }
+      viewers.delete(id);
       return reply.code(204).send();
     } catch (err) {
       request.log.error(err, "Failed to delete stream");
@@ -196,15 +241,27 @@ async function cleanupStaleStreams() {
       if (state === "finished" || state === "failed") {
         app.log.info(`Cleaning up stale stream ${streamId} (state: ${state})`);
         await restreamer.deleteProcess(streamId);
-        streamMeta.delete(streamId);
+        if (meta && !meta.stoppedAt) {
+          meta.stoppedAt = new Date().toISOString();
+        }
         viewers.delete(streamId);
       }
       // Delete processes stuck in "waiting" for > 10 minutes (never got RTMP input)
       else if (state !== "running" && ageMs > 10 * 60 * 1000) {
         app.log.info(`Cleaning up abandoned stream ${streamId} (age: ${Math.round(ageMs / 1000)}s)`);
         await restreamer.deleteProcess(streamId);
-        streamMeta.delete(streamId);
+        if (meta && !meta.stoppedAt) {
+          meta.stoppedAt = new Date().toISOString();
+        }
         viewers.delete(streamId);
+      }
+    }
+
+    // Remove stopped metadata older than 1 hour
+    const now = Date.now();
+    for (const [streamId, meta] of streamMeta) {
+      if (meta.stoppedAt && now - new Date(meta.stoppedAt).getTime() > STOPPED_TTL_MS) {
+        streamMeta.delete(streamId);
       }
     }
   } catch (err) {
