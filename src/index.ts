@@ -105,24 +105,26 @@ app.get("/api/streams", async (_request, reply) => {
     const processes = await restreamer.listAltaProcesses();
     const activeIds = new Set<string>();
 
-    // Active streams (from Restreamer)
-    const streams: StreamPublicInfo[] = processes.map((p) => {
-      const streamId = p.config.id.replace("alta-", "");
-      activeIds.add(streamId);
-      const meta = streamMeta.get(streamId);
-      // If it was previously stopped but process exists again, clear stoppedAt
-      if (meta?.stoppedAt) {
-        meta.stoppedAt = undefined;
-      }
-      return {
-        id: streamId,
-        name: meta?.name || streamId,
-        hlsUrl: restreamer.hlsUrl(streamId),
-        createdAt: meta?.createdAt || "",
-        status: p.state?.exec === "running" ? "live" as const : "waiting" as const,
-        viewers: getViewerCount(streamId),
-      };
-    });
+    // Active streams (from Restreamer) — check HLS manifest to determine live status
+    const streams: StreamPublicInfo[] = await Promise.all(
+      processes.map(async (p) => {
+        const streamId = p.config.id.replace("alta-", "");
+        activeIds.add(streamId);
+        const meta = streamMeta.get(streamId);
+        if (meta?.stoppedAt) {
+          meta.stoppedAt = undefined;
+        }
+        const hlsLive = await restreamer.isHlsLive(streamId);
+        return {
+          id: streamId,
+          name: meta?.name || streamId,
+          hlsUrl: restreamer.hlsUrl(streamId),
+          createdAt: meta?.createdAt || "",
+          status: hlsLive ? "live" as const : "waiting" as const,
+          viewers: getViewerCount(streamId),
+        };
+      })
+    );
 
     // Stopped streams (metadata with stoppedAt, within 1h)
     const now = Date.now();
@@ -175,12 +177,13 @@ app.get<{ Params: { id: string } }>(
         return reply.code(404).send({ error: "Stream not found" });
       }
 
+      const hlsLive = await restreamer.isHlsLive(id);
       const info: StreamPublicInfo = {
         id,
         name: meta?.name || id,
         hlsUrl: restreamer.hlsUrl(id),
         createdAt: meta?.createdAt || "",
-        status: process.state?.exec === "running" ? "live" : "waiting",
+        status: hlsLive ? "live" : "waiting",
         viewers: getViewerCount(id),
       };
 

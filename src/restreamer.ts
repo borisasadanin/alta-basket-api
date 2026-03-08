@@ -163,4 +163,13 @@ export class RestreamerClient {
   hlsUrl(streamId: string): string {
     return `${this.baseUrl}/memfs/${streamId}.m3u8`;
   }
+
+  async isHlsLive(streamId: string): Promise<boolean> {
+    try {
+      const res = await fetch(`${this.baseUrl}/memfs/${streamId}.m3u8`, { method: "HEAD" });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
 }
