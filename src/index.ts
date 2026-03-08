@@ -78,12 +78,12 @@ app.post<{ Body: CreateStreamBody }>("/api/streams", async (request, reply) => {
 
   const displayName = `${name.trim()} kamera`;
 
-  // If deviceId provided, look for an existing stream from this device
+  // If deviceId provided, look for an existing stream from this device with same name
   if (deviceId) {
     for (const [existingId, meta] of streamMeta) {
-      if (meta.deviceId !== deviceId) continue;
+      if (meta.deviceId !== deviceId || meta.name !== displayName) continue;
 
-      // Found a stream from this device — reuse it
+      // Found a stream from this device with same name — reuse it
       if (meta.stoppedAt) {
         // Was stopped — recreate Restreamer process with same ID
         try {
@@ -92,7 +92,6 @@ app.post<{ Body: CreateStreamBody }>("/api/streams", async (request, reply) => {
           // Process might still exist, ignore
         }
         meta.stoppedAt = undefined;
-        meta.name = displayName;
         meta.createdAt = new Date().toISOString();
       }
 
