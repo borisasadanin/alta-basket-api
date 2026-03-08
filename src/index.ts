@@ -21,7 +21,7 @@ if (!OSC_PAT) {
 
 // --- In-memory stream metadata ---
 
-const STOPPED_TTL_MS = 60 * 60 * 1000; // 1 hour
+const STOPPED_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const streamMeta = new Map<string, { name: string; createdAt: string; stoppedAt?: string }>();
 
 // --- Viewer tracking: streamId -> Map<ip, lastSeenTimestamp> ---
