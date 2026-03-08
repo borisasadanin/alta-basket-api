@@ -17,6 +17,7 @@ export interface StreamPublicInfo {
 
 export interface CreateStreamBody {
   name: string;
+  deviceId?: string;
 }
 
 export interface RestreamerProcess {

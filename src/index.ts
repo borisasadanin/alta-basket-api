@@ -22,7 +22,7 @@ if (!OSC_PAT) {
 // --- In-memory stream metadata ---
 
 const STOPPED_TTL_MS = 10 * 60 * 1000; // 10 minutes
-const streamMeta = new Map<string, { name: string; createdAt: string; stoppedAt?: string }>();
+const streamMeta = new Map<string, { name: string; createdAt: string; stoppedAt?: string; deviceId?: string }>();
 
 // --- Viewer tracking: streamId -> Map<ip, lastSeenTimestamp> ---
 
@@ -67,17 +67,49 @@ function requireApiKey(
 
 // --- Routes ---
 
-// POST /api/streams — Create a new stream
+// POST /api/streams — Create a new stream (or resume existing one for same device)
 app.post<{ Body: CreateStreamBody }>("/api/streams", async (request, reply) => {
   if (!requireApiKey(request, reply)) return;
 
-  const { name } = request.body || {};
+  const { name, deviceId } = request.body || {};
   if (!name || typeof name !== "string" || name.trim().length === 0) {
     return reply.code(400).send({ error: 'Missing "name" field' });
   }
 
-  const streamId = crypto.randomUUID().slice(0, 8);
   const displayName = `${name.trim()} kamera`;
+
+  // If deviceId provided, look for an existing stream from this device
+  if (deviceId) {
+    for (const [existingId, meta] of streamMeta) {
+      if (meta.deviceId !== deviceId) continue;
+
+      // Found a stream from this device — reuse it
+      if (meta.stoppedAt) {
+        // Was stopped — recreate Restreamer process with same ID
+        try {
+          await restreamer.createProcess(existingId);
+        } catch {
+          // Process might still exist, ignore
+        }
+        meta.stoppedAt = undefined;
+        meta.name = displayName;
+        meta.createdAt = new Date().toISOString();
+      }
+
+      // Return existing stream info (whether it was stopped or still active)
+      const info: StreamInfo = {
+        id: existingId,
+        name: meta.name,
+        rtmpUrl: restreamer.rtmpUrl(existingId),
+        hlsUrl: restreamer.hlsUrl(existingId),
+        createdAt: meta.createdAt,
+      };
+      return reply.code(200).send(info);
+    }
+  }
+
+  // No existing stream for this device — create new
+  const streamId = crypto.randomUUID().slice(0, 8);
 
   try {
     await restreamer.createProcess(streamId);
@@ -90,7 +122,7 @@ app.post<{ Body: CreateStreamBody }>("/api/streams", async (request, reply) => {
       createdAt: new Date().toISOString(),
     };
 
-    streamMeta.set(streamId, { name: displayName, createdAt: info.createdAt });
+    streamMeta.set(streamId, { name: displayName, createdAt: info.createdAt, deviceId });
 
     return reply.code(201).send(info);
   } catch (err) {
