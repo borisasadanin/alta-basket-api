@@ -206,6 +206,36 @@ export class OscInstanceManager {
    * If state is "running" but the instance is unreachable, resets to "stopped".
    */
   async quickCheck(): Promise<InstanceState> {
+    // If we think it's stopped, check if the instance actually exists in OSC
+    // (handles backend restart where in-memory state is lost)
+    if (this.state === "stopped" && !this.cachedInfo) {
+      try {
+        const sat = await this.ctx.getServiceAccessToken(SERVICE_ID);
+        const instance = await getInstance(this.ctx, SERVICE_ID, this.instanceName, sat);
+        if (instance?.url) {
+          // Instance exists — verify it's actually reachable
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 3000);
+          const res = await fetch(`${instance.url}/api/v3/process`, {
+            headers: { Authorization: `Bearer ${sat}` },
+            signal: controller.signal,
+          });
+          clearTimeout(timeout);
+          if (res.ok) {
+            // Recover state from the live instance
+            const rtmpHost = await this.discoverRtmpHost(sat);
+            this.cachedInfo = { url: instance.url, rtmpHost };
+            this.state = "running";
+            this.log.info(`Recovered running Restreamer instance — URL: ${instance.url}, RTMP: ${rtmpHost}`);
+            return "running";
+          }
+        }
+      } catch {
+        // Instance doesn't exist or is unreachable — truly stopped
+      }
+      return "stopped";
+    }
+
     if (this.state !== "running" || !this.cachedInfo) {
       return this.state;
     }

@@ -529,17 +529,22 @@ app.get("/api/restreamer/status", async (request, reply) => {
   });
 });
 
-// POST /api/restreamer/start — Force-start Restreamer instance
+// POST /api/restreamer/start — Trigger Restreamer instance start (non-blocking)
 app.post("/api/restreamer/start", async (request, reply) => {
   if (!requireApiKey(request, reply)) return;
-  try {
-    const info = await oscManager.ensureRunning();
-    restreamer.rtmpHost = info.rtmpHost;
-    return reply.send({ state: "running", info });
-  } catch (err) {
-    request.log.error(err, "Failed to start Restreamer");
-    return reply.code(500).send({ error: "Failed to start Restreamer" });
+  const currentState = oscManager.getState();
+  if (currentState === "running") {
+    return reply.send({ state: "running", info: oscManager.getInfo() });
   }
+  if (currentState !== "starting") {
+    // Fire and forget — client polls /status to track progress
+    oscManager.ensureRunning().then((info) => {
+      restreamer.rtmpHost = info.rtmpHost;
+    }).catch((err) => {
+      request.log.error(err, "Background Restreamer start failed");
+    });
+  }
+  return reply.send({ state: "starting" });
 });
 
 // DELETE /api/restreamer/stop — Force-stop Restreamer instance
