@@ -3,7 +3,8 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { RestreamerClient } from "./restreamer.js";
 import { OscInstanceManager } from "./osc-manager.js";
-import type { CreateStreamBody, StreamInfo, StreamPublicInfo } from "./types.js";
+import { MinioClient } from "./minio.js";
+import type { CreateStreamBody, StreamInfo, StreamPublicInfo, VodEntry } from "./types.js";
 
 // --- Config ---
 
@@ -20,6 +21,15 @@ const RESTREAMER_GRACE_PERIOD_MS = parseInt(
   process.env.RESTREAMER_GRACE_PERIOD_MS || String(15 * 60 * 1000),
   10
 );
+
+// MinIO config
+const MINIO_ENDPOINT =
+  process.env.MINIO_ENDPOINT ||
+  "https://borispriv-basket.minio-minio.auto.prod.osaas.io";
+const MINIO_ACCESS_KEY = process.env.MINIO_ACCESS_KEY || "root";
+const MINIO_SECRET_KEY =
+  process.env.MINIO_SECRET_KEY || "37be8999e5d3d04615705921defbaea9";
+const MINIO_RECORDINGS_BUCKET = "recordings";
 
 if (!OSC_PAT) {
   console.error("Missing OSC_ACCESS_TOKEN");
@@ -87,10 +97,17 @@ function getViewerCount(streamId: string): number {
 
 const app = Fastify({ logger: true });
 const restreamer = new RestreamerClient(RESTREAMER_URL, OSC_PAT, "");
+const minio = new MinioClient(MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY);
 const oscManager = new OscInstanceManager({
   instanceName: OSC_INSTANCE_NAME,
   gracePeriodMs: RESTREAMER_GRACE_PERIOD_MS,
   logger: app.log,
+  s3Config: {
+    endpoint: MINIO_ENDPOINT.replace(/^https?:\/\//, ""),
+    accessKeyId: MINIO_ACCESS_KEY,
+    secretAccessKey: MINIO_SECRET_KEY,
+    bucket: MINIO_RECORDINGS_BUCKET,
+  },
 });
 
 await app.register(cors, { origin: true });
@@ -203,7 +220,7 @@ app.post<{ Body: CreateStreamBody }>("/api/streams", async (request, reply) => {
       if (meta.stoppedAt) {
         // Was stopped — recreate Restreamer process with same ID
         try {
-          await restreamer.createProcess(existingId);
+          await restreamer.createProcess(existingId, { recording: true });
         } catch {
           // Process might still exist, ignore
         }
@@ -229,7 +246,7 @@ app.post<{ Body: CreateStreamBody }>("/api/streams", async (request, reply) => {
   const streamId = crypto.randomUUID().slice(0, 8);
 
   try {
-    await restreamer.createProcess(streamId);
+    await restreamer.createProcess(streamId, { recording: true });
 
     oscManager.streamStarted();
 
@@ -242,6 +259,23 @@ app.post<{ Body: CreateStreamBody }>("/api/streams", async (request, reply) => {
     };
 
     streamMeta.set(streamId, { name: displayName, createdAt: info.createdAt, deviceId });
+
+    // Create VOD entry with dummy match metadata
+    const vodEntry: VodEntry = {
+      id: streamId,
+      matchTitle: "Basketmatch",
+      location: "Ältahallen",
+      homeTeam: "Älta IF",
+      awayTeam: "Motståndare",
+      matchDate: new Date().toISOString().slice(0, 10),
+      cameraName: name.trim(),
+      hlsUrl: minio.hlsUrl(streamId),
+      createdAt: info.createdAt,
+    };
+
+    minio.addVodEntry(vodEntry).catch((err) => {
+      request.log.error(err, "Failed to save VOD entry");
+    });
 
     return reply.code(201).send(info);
   } catch (err) {
@@ -380,8 +414,17 @@ app.delete<{ Params: { id: string } }>(
       await restreamer.deleteProcess(id);
       // Keep metadata with stoppedAt so it shows as "stopped" for TTL
       const meta = streamMeta.get(id);
+      const stoppedAt = new Date().toISOString();
       if (meta) {
-        meta.stoppedAt = new Date().toISOString();
+        meta.stoppedAt = stoppedAt;
+
+        // Finalize VOD entry with stop time and duration
+        const durationSeconds = Math.round(
+          (new Date(stoppedAt).getTime() - new Date(meta.createdAt).getTime()) / 1000
+        );
+        minio.updateVodEntry(id, { stoppedAt, durationSeconds }).catch((err) => {
+          request.log.error(err, "Failed to finalize VOD entry");
+        });
       }
       viewers.delete(id);
       oscManager.streamEnded();
@@ -435,6 +478,8 @@ async function cleanupStaleStreams() {
         await restreamer.deleteProcess(streamId);
         if (meta && !meta.stoppedAt) {
           meta.stoppedAt = new Date().toISOString();
+          const dur = Math.round((new Date(meta.stoppedAt).getTime() - new Date(meta.createdAt).getTime()) / 1000);
+          minio.updateVodEntry(streamId, { stoppedAt: meta.stoppedAt, durationSeconds: dur }).catch(() => {});
         }
         viewers.delete(streamId);
       }
@@ -444,6 +489,8 @@ async function cleanupStaleStreams() {
         await restreamer.deleteProcess(streamId);
         if (meta && !meta.stoppedAt) {
           meta.stoppedAt = new Date().toISOString();
+          const dur = Math.round((new Date(meta.stoppedAt).getTime() - new Date(meta.createdAt).getTime()) / 1000);
+          minio.updateVodEntry(streamId, { stoppedAt: meta.stoppedAt, durationSeconds: dur }).catch(() => {});
         }
         viewers.delete(streamId);
       } else {
@@ -471,11 +518,13 @@ setInterval(cleanupStaleStreams, 60_000);
 
 // --- Restreamer admin routes ---
 
-// GET /api/restreamer/status — Check Restreamer instance state
+// GET /api/restreamer/status — Check Restreamer instance state (with liveness verification)
 app.get("/api/restreamer/status", async (request, reply) => {
   if (!requireApiKey(request, reply)) return;
+  // When state is "running", do a quick liveness check to catch crashed/unreachable instances
+  const state = await oscManager.quickCheck();
   return reply.send({
-    state: oscManager.getState(),
+    state,
     info: oscManager.getInfo(),
   });
 });
@@ -505,10 +554,102 @@ app.delete("/api/restreamer/stop", async (request, reply) => {
   }
 });
 
+// --- VOD routes ---
+
+// GET /api/vod — List all VOD recordings
+app.get("/api/vod", async (request, reply) => {
+  if (!requireViewerAuth(request, reply)) return;
+
+  try {
+    const entries = await minio.readVodIndex();
+    // Sort by date descending (newest first), only return completed recordings
+    const sorted = entries
+      .filter((e) => e.stoppedAt)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    return reply.send(sorted);
+  } catch (err) {
+    request.log.error(err, "Failed to read VOD index");
+    return reply.code(500).send({ error: "Failed to load recordings" });
+  }
+});
+
+// GET /api/vod/:id — Get a specific VOD entry
+app.get<{ Params: { id: string } }>("/api/vod/:id", async (request, reply) => {
+  if (!requireViewerAuth(request, reply)) return;
+
+  const { id } = request.params;
+  try {
+    const entries = await minio.readVodIndex();
+    const entry = entries.find((e) => e.id === id);
+    if (!entry) {
+      return reply.code(404).send({ error: "Recording not found" });
+    }
+    return reply.send(entry);
+  } catch (err) {
+    request.log.error(err, "Failed to read VOD entry");
+    return reply.code(500).send({ error: "Failed to load recording" });
+  }
+});
+
+// PUT /api/vod/:id — Update VOD metadata (admin, requires API key)
+app.put<{ Params: { id: string }; Body: Partial<VodEntry> }>(
+  "/api/vod/:id",
+  async (request, reply) => {
+    if (!requireApiKey(request, reply)) return;
+
+    const { id } = request.params;
+    const allowedFields = [
+      "matchTitle", "location", "homeTeam", "awayTeam", "matchDate",
+    ] as const;
+
+    const update: Partial<VodEntry> = {};
+    for (const field of allowedFields) {
+      if (request.body[field] !== undefined) {
+        (update as Record<string, unknown>)[field] = request.body[field];
+      }
+    }
+
+    try {
+      await minio.updateVodEntry(id, update);
+      return reply.send({ ok: true });
+    } catch (err) {
+      request.log.error(err, "Failed to update VOD entry");
+      return reply.code(500).send({ error: "Failed to update recording" });
+    }
+  }
+);
+
+// DELETE /api/vod/:id — Delete a VOD entry (admin, requires API key)
+app.delete<{ Params: { id: string } }>("/api/vod/:id", async (request, reply) => {
+  if (!requireApiKey(request, reply)) return;
+
+  const { id } = request.params;
+  try {
+    const entries = await minio.readVodIndex();
+    const filtered = entries.filter((e) => e.id !== id);
+    if (filtered.length === entries.length) {
+      return reply.code(404).send({ error: "Recording not found" });
+    }
+    await minio.writeVodIndex(filtered);
+    return reply.code(204).send();
+  } catch (err) {
+    request.log.error(err, "Failed to delete VOD entry");
+    return reply.code(500).send({ error: "Failed to delete recording" });
+  }
+});
+
 // --- Health check ---
 app.get("/health", async () => ({ status: "ok" }));
 
 // --- Start ---
+
+// Ensure MinIO recordings bucket exists
+try {
+  await minio.ensureBucket();
+  console.log("MinIO recordings bucket ready");
+} catch (err) {
+  console.error("Failed to initialize MinIO bucket (VOD will be unavailable):", err);
+}
 
 try {
   await app.listen({ port: PORT, host: "0.0.0.0" });

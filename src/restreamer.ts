@@ -86,8 +86,51 @@ export class RestreamerClient {
 
   // --- Process management ---
 
-  async createProcess(streamId: string): Promise<RestreamerProcess> {
+  async createProcess(
+    streamId: string,
+    options?: { recording?: boolean }
+  ): Promise<RestreamerProcess> {
     const processId = `${PROCESS_PREFIX}${streamId}`;
+
+    const outputs: { id: string; address: string; options: string[] }[] = [
+      {
+        id: "output",
+        address: `{memfs}/${streamId}.m3u8`,
+        options: [
+          "-codec",
+          "copy",
+          "-f",
+          "hls",
+          "-hls_time",
+          "4",
+          "-hls_list_size",
+          "6",
+          "-hls_flags",
+          "delete_segments",
+        ],
+      },
+    ];
+
+    if (options?.recording) {
+      outputs.push({
+        id: "recording",
+        address: `{fs:minio}/${streamId}/index.m3u8`,
+        options: [
+          "-codec",
+          "copy",
+          "-f",
+          "hls",
+          "-hls_time",
+          "4",
+          "-hls_list_size",
+          "0",
+          "-hls_flags",
+          "append_list+program_date_time",
+          "-hls_segment_filename",
+          `{fs:minio}/${streamId}/seg_%05d.ts`,
+        ],
+      });
+    }
 
     const processConfig = {
       id: processId,
@@ -102,24 +145,7 @@ export class RestreamerClient {
           options: ["-f", "live_flv"],
         },
       ],
-      output: [
-        {
-          id: "output",
-          address: `{memfs}/${streamId}.m3u8`,
-          options: [
-            "-codec",
-            "copy",
-            "-f",
-            "hls",
-            "-hls_time",
-            "4",
-            "-hls_list_size",
-            "6",
-            "-hls_flags",
-            "delete_segments",
-          ],
-        },
-      ],
+      output: outputs,
     };
 
     return this.request<RestreamerProcess>(

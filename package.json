@@ -8,6 +8,7 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1004.0",
     "@fastify/cors": "^11.2.0",
     "@osaas/client-core": "^0.21.0",
     "@osaas/client-services": "^0.15.0",

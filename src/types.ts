@@ -38,3 +38,17 @@ export interface RestreamerProcess {
   };
   metadata?: Record<string, unknown>;
 }
+
+export interface VodEntry {
+  id: string;
+  matchTitle: string;
+  location: string;
+  homeTeam: string;
+  awayTeam: string;
+  matchDate: string;
+  cameraName: string;
+  hlsUrl: string;
+  createdAt: string;
+  stoppedAt?: string;
+  durationSeconds?: number;
+}

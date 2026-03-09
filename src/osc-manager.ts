@@ -15,12 +15,20 @@ export interface InstanceInfo {
   rtmpHost: string;
 }
 
+export interface S3StorageConfig {
+  endpoint: string;       // MinIO host without https:// (e.g. "borispriv-basket.minio-minio.auto.prod.osaas.io")
+  accessKeyId: string;
+  secretAccessKey: string;
+  bucket: string;
+}
+
 interface OscManagerOptions {
   instanceName: string;
   gracePeriodMs?: number;
   startupTimeoutMs?: number;
   healthPollMs?: number;
   logger?: { info: (...args: unknown[]) => void; error: (...args: unknown[]) => void };
+  s3Config?: S3StorageConfig;
 }
 
 export class OscInstanceManager {
@@ -36,6 +44,7 @@ export class OscInstanceManager {
   private gracePeriodTimer: ReturnType<typeof setTimeout> | null = null;
   private cachedInfo: InstanceInfo | null = null;
   private activeStreamCount = 0;
+  private s3Config?: S3StorageConfig;
 
   constructor(opts: OscManagerOptions) {
     this.ctx = new Context();
@@ -44,6 +53,7 @@ export class OscInstanceManager {
     this.startupTimeoutMs = opts.startupTimeoutMs ?? 180_000;
     this.healthPollMs = opts.healthPollMs ?? 2000;
     this.log = opts.logger ?? { info: console.log, error: console.error };
+    this.s3Config = opts.s3Config;
   }
 
   getState(): InstanceState {
@@ -155,8 +165,8 @@ export class OscInstanceManager {
 
     const url: string = instance.url;
 
-    // Wait for Restreamer to be healthy
-    await this.waitForHealth(url);
+    // Wait for Restreamer to be healthy (verify API is actually responsive)
+    await this.waitForHealth(url, true);
 
     // Enable RTMP server (disabled by default on fresh instances)
     await this.enableRtmp(url, sat);
@@ -180,20 +190,62 @@ export class OscInstanceManager {
 
     const data = (await configRes.json()) as { config: Record<string, unknown> };
     const rtmpConfig = data.config.rtmp as { enable?: boolean; [k: string]: unknown } | undefined;
+    const storageConfig = data.config.storage as { s3?: unknown[]; [k: string]: unknown } | undefined;
 
-    if (!rtmpConfig?.enable) {
-      this.log.info("RTMP found disabled, re-enabling...");
+    const needsRtmp = !rtmpConfig?.enable;
+    const needsS3 = this.s3Config && (!storageConfig?.s3 || storageConfig.s3.length === 0);
+
+    if (needsRtmp || needsS3) {
+      this.log.info(`Re-applying config (RTMP: ${needsRtmp}, S3: ${!!needsS3})...`);
       await this.enableRtmp(url, sat);
     }
   }
 
-  private async waitForHealth(url: string): Promise<void> {
+  /**
+   * Quick liveness check — returns true if Restreamer API is responsive.
+   * If state is "running" but the instance is unreachable, resets to "stopped".
+   */
+  async quickCheck(): Promise<InstanceState> {
+    if (this.state !== "running" || !this.cachedInfo) {
+      return this.state;
+    }
+
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3000);
+      const res = await fetch(`${this.cachedInfo.url}/api/v3/process`, {
+        headers: { Authorization: `Bearer ${await this.ctx.getServiceAccessToken(SERVICE_ID)}` },
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      if (res.ok) return "running";
+    } catch {
+      // Instance unreachable
+    }
+
+    this.log.info("Restreamer liveness check failed — marking as stopped");
+    this.state = "stopped";
+    this.cachedInfo = null;
+    this.startPromise = null;
+    return "stopped";
+  }
+
+  private async waitForHealth(url: string, verifyApi = false): Promise<void> {
     const deadline = Date.now() + this.startupTimeoutMs;
 
     while (Date.now() < deadline) {
       try {
         const res = await fetch(url, { method: "GET" });
-        if (res.ok) return;
+        if (res.ok) {
+          if (!verifyApi) return;
+          // Also verify the process API is responsive (not just the web UI)
+          const sat = await this.ctx.getServiceAccessToken(SERVICE_ID);
+          const apiRes = await fetch(`${url}/api/v3/process`, {
+            headers: { Authorization: `Bearer ${sat}` },
+          });
+          if (apiRes.ok) return;
+          this.log.info("Base URL healthy but API not ready yet, retrying...");
+        }
       } catch {
         // Not ready yet
       }
@@ -220,16 +272,39 @@ export class OscInstanceManager {
     const innerConfig = data.config;
     const rtmpConfig = innerConfig.rtmp as { enable?: boolean; [k: string]: unknown } | undefined;
 
-    if (rtmpConfig?.enable) {
-      this.log.info("RTMP already enabled");
+    const storageConfig = innerConfig.storage as { s3?: unknown[]; [k: string]: unknown } | undefined;
+    const needsRtmp = !rtmpConfig?.enable;
+    const needsS3 = this.s3Config && (!storageConfig?.s3 || storageConfig.s3.length === 0);
+
+    if (!needsRtmp && !needsS3) {
+      this.log.info("RTMP and S3 already configured");
       return;
     }
 
-    // Enable RTMP in the inner config object
-    const updatedConfig = {
+    // Build updated config with RTMP + S3 storage
+    const updatedConfig: Record<string, unknown> = {
       ...innerConfig,
       rtmp: { ...rtmpConfig, enable: true },
     };
+
+    if (this.s3Config) {
+      updatedConfig.storage = {
+        ...storageConfig,
+        s3: [
+          {
+            name: "minio",
+            mountpoint: "/s3",
+            endpoint: this.s3Config.endpoint,
+            access_key_id: this.s3Config.accessKeyId,
+            secret_access_key: this.s3Config.secretAccessKey,
+            bucket: this.s3Config.bucket,
+            region: "us-east-1",
+            use_ssl: true,
+            auth: { enable: false, username: "", password: "" },
+          },
+        ],
+      };
+    }
 
     const putRes = await fetch(`${url}/api/v3/config`, {
       method: "PUT",
@@ -245,16 +320,16 @@ export class OscInstanceManager {
       throw new Error(`Failed to enable RTMP: ${putRes.status} ${body}`);
     }
 
-    this.log.info("RTMP enabled, reloading config...");
+    this.log.info(`Config updated (RTMP + ${this.s3Config ? "S3" : "no S3"}), reloading...`);
 
     // Reload config (restarts core)
     await fetch(`${url}/api/v3/config/reload`, {
       headers: { Authorization: `Bearer ${sat}` },
     });
 
-    // Wait for Restreamer to come back after reload
+    // Wait for Restreamer to come back after reload (verify API is ready, not just web UI)
     await this.sleep(3000);
-    await this.waitForHealth(url);
+    await this.waitForHealth(url, true);
   }
 
   private async discoverRtmpHost(sat: string): Promise<string> {
