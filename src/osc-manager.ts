@@ -55,11 +55,6 @@ export class OscInstanceManager {
   }
 
   async ensureRunning(): Promise<InstanceInfo> {
-    // Already running — return cached info
-    if (this.state === "running" && this.cachedInfo) {
-      return this.cachedInfo;
-    }
-
     // Already starting — await the same promise (no duplicate creation)
     if (this.state === "starting" && this.startPromise) {
       return this.startPromise;
@@ -69,7 +64,21 @@ export class OscInstanceManager {
     if (this.state === "stopping" && this.cachedInfo) {
       this.cancelGracePeriod();
       this.state = "running";
-      return this.cachedInfo;
+    }
+
+    // Already running — verify RTMP is still enabled (container may have restarted)
+    if (this.state === "running" && this.cachedInfo) {
+      try {
+        await this.verifyRtmpEnabled(this.cachedInfo.url);
+      } catch (err) {
+        this.log.error(err, "RTMP verification failed, restarting instance");
+        this.state = "stopped";
+        this.cachedInfo = null;
+        // Fall through to start fresh
+      }
+      if (this.state === "running") {
+        return this.cachedInfo!;
+      }
     }
 
     // Stopped — start fresh
@@ -157,6 +166,25 @@ export class OscInstanceManager {
 
     this.log.info(`Restreamer ready — URL: ${url}, RTMP: ${rtmpHost}`);
     return { url, rtmpHost };
+  }
+
+  private async verifyRtmpEnabled(url: string): Promise<void> {
+    const sat = await this.ctx.getServiceAccessToken(SERVICE_ID);
+    const configRes = await fetch(`${url}/api/v3/config`, {
+      headers: { Authorization: `Bearer ${sat}` },
+    });
+
+    if (!configRes.ok) {
+      throw new Error(`Could not read Restreamer config: ${configRes.status}`);
+    }
+
+    const data = (await configRes.json()) as { config: Record<string, unknown> };
+    const rtmpConfig = data.config.rtmp as { enable?: boolean; [k: string]: unknown } | undefined;
+
+    if (!rtmpConfig?.enable) {
+      this.log.info("RTMP found disabled, re-enabling...");
+      await this.enableRtmp(url, sat);
+    }
   }
 
   private async waitForHealth(url: string): Promise<void> {
