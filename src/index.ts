@@ -9,6 +9,8 @@ import type { CreateStreamBody, StreamInfo, StreamPublicInfo } from "./types.js"
 
 const PORT = parseInt(process.env.PORT || "8000", 10);
 const API_KEY = process.env.API_KEY || "alta-basket-2026";
+let VIEWER_PIN = process.env.VIEWER_PIN || "738492";
+const VIEWER_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const OSC_INSTANCE_NAME = process.env.OSC_INSTANCE_NAME || "restreamerlive";
 const RESTREAMER_URL =
   process.env.RESTREAMER_URL ||
@@ -23,6 +25,38 @@ if (!OSC_PAT) {
   console.error("Missing OSC_ACCESS_TOKEN");
   process.exit(1);
 }
+
+if (!VIEWER_PIN) {
+  console.warn("VIEWER_PIN not set — viewer access is unprotected");
+}
+
+// --- Viewer token store ---
+
+const viewerTokens = new Map<string, number>(); // token -> expiresAt timestamp
+
+function createViewerToken(): string {
+  const token = crypto.randomUUID();
+  viewerTokens.set(token, Date.now() + VIEWER_TOKEN_TTL_MS);
+  return token;
+}
+
+function isValidViewerToken(token: string): boolean {
+  const exp = viewerTokens.get(token);
+  if (!exp) return false;
+  if (Date.now() > exp) {
+    viewerTokens.delete(token);
+    return false;
+  }
+  return true;
+}
+
+// Clean up expired tokens every hour
+setInterval(() => {
+  const now = Date.now();
+  for (const [token, exp] of viewerTokens) {
+    if (now > exp) viewerTokens.delete(token);
+  }
+}, 60 * 60 * 1000);
 
 // --- In-memory stream metadata ---
 
@@ -75,7 +109,68 @@ function requireApiKey(
   return true;
 }
 
+/** Check API key OR valid viewer token. Returns true if authorized. */
+function requireViewerAuth(
+  request: { headers: Record<string, string | string[] | undefined> },
+  reply: { code: (n: number) => { send: (o: unknown) => void } }
+): boolean {
+  // No PIN configured → open access
+  if (!VIEWER_PIN) return true;
+
+  // API key always works (for the iOS app)
+  const key = request.headers["x-api-key"];
+  if (API_KEY && key === API_KEY) return true;
+
+  // Check viewer token from Authorization header
+  const auth = request.headers.authorization;
+  if (typeof auth === "string" && auth.startsWith("Bearer ")) {
+    const token = auth.slice(7);
+    if (isValidViewerToken(token)) return true;
+  }
+
+  reply.code(401).send({ error: "Åtkomst nekad. Ange kod för att titta." });
+  return false;
+}
+
 // --- Routes ---
+
+// GET /api/auth/status — Check if PIN protection is active
+app.get("/api/auth/status", async (_request, reply) => {
+  return reply.send({ pinRequired: !!VIEWER_PIN });
+});
+
+// POST /api/auth/verify — Verify viewer PIN and return a session token
+app.post<{ Body: { pin?: string } }>("/api/auth/verify", async (request, reply) => {
+  if (!VIEWER_PIN) {
+    // No PIN configured — return a token anyway
+    return reply.send({ token: createViewerToken() });
+  }
+
+  const { pin } = request.body || {};
+  if (!pin || pin !== VIEWER_PIN) {
+    return reply.code(401).send({ error: "Fel kod" });
+  }
+
+  const token = createViewerToken();
+  return reply.send({ token });
+});
+
+// PUT /api/auth/pin — Change the viewer PIN (admin, requires API key)
+app.put<{ Body: { pin?: string } }>("/api/auth/pin", async (request, reply) => {
+  if (!requireApiKey(request, reply)) return;
+
+  const { pin } = request.body || {};
+  if (!pin || typeof pin !== "string" || !/^\d{4,8}$/.test(pin)) {
+    return reply.code(400).send({ error: "PIN must be 4-8 digits" });
+  }
+
+  VIEWER_PIN = pin;
+  // Invalidate all existing viewer tokens so everyone must re-enter the new PIN
+  viewerTokens.clear();
+
+  app.log.info(`Viewer PIN updated (${pin.length} digits)`);
+  return reply.send({ ok: true, pinLength: pin.length });
+});
 
 // POST /api/streams — Create a new stream (or resume existing one for same device)
 app.post<{ Body: CreateStreamBody }>("/api/streams", async (request, reply) => {
@@ -157,6 +252,8 @@ app.post<{ Body: CreateStreamBody }>("/api/streams", async (request, reply) => {
 
 // GET /api/streams — List active + recently stopped streams
 app.get("/api/streams", async (_request, reply) => {
+  if (!requireViewerAuth(_request, reply)) return;
+
   // If Restreamer is not running, only return stopped metadata
   if (oscManager.getState() === "stopped") {
     const streams: StreamPublicInfo[] = [];
@@ -227,6 +324,8 @@ app.get("/api/streams", async (_request, reply) => {
 app.get<{ Params: { id: string } }>(
   "/api/streams/:id",
   async (request, reply) => {
+    if (!requireViewerAuth(request, reply)) return;
+
     const { id } = request.params;
     try {
       const meta = streamMeta.get(id);
