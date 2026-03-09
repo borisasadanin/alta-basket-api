@@ -114,7 +114,7 @@ export class RestreamerClient {
     if (options?.recording) {
       outputs.push({
         id: "recording",
-        address: `{minio}/${streamId}/index.m3u8`,
+        address: `{diskfs}/s3/${streamId}/index.m3u8`,
         options: [
           "-codec",
           "copy",
@@ -127,7 +127,7 @@ export class RestreamerClient {
           "-hls_flags",
           "append_list+program_date_time",
           "-hls_segment_filename",
-          `{minio}/${streamId}/seg_%05d.ts`,
+          `{diskfs}/s3/${streamId}/seg_%05d.ts`,
         ],
       });
     }
