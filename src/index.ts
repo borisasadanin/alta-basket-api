@@ -135,7 +135,7 @@ const oscManager = new OscInstanceManager({
   },
 });
 
-await app.register(cors, { origin: true });
+await app.register(cors, { origin: true, methods: ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"] });
 
 // --- Auth middleware ---
 
