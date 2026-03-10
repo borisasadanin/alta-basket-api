@@ -10,7 +10,7 @@ import type { CreateStreamBody, StreamInfo, StreamPublicInfo, VodEntry } from ".
 
 const PORT = parseInt(process.env.PORT || "8000", 10);
 const API_KEY = process.env.API_KEY || "alta-basket-2026";
-let VIEWER_PIN = process.env.VIEWER_PIN || "738492";
+let VIEWER_PIN = process.env.VIEWER_PIN || "123456";
 const VIEWER_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const OSC_INSTANCE_NAME = process.env.OSC_INSTANCE_NAME || "restreamerlive";
 const RESTREAMER_URL =
