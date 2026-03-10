@@ -11,7 +11,9 @@ import type { CreateStreamBody, StreamInfo, StreamPublicInfo, VodEntry } from ".
 const PORT = parseInt(process.env.PORT || "8000", 10);
 const API_KEY = process.env.API_KEY || "alta-basket-2026";
 let VIEWER_PIN = process.env.VIEWER_PIN || "123456";
+const ADMIN_PIN = process.env.ADMIN_PIN || "804480";
 const VIEWER_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const ADMIN_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const OSC_INSTANCE_NAME = process.env.OSC_INSTANCE_NAME || "restreamerlive";
 const RESTREAMER_URL =
   process.env.RESTREAMER_URL ||
@@ -60,11 +62,34 @@ function isValidViewerToken(token: string): boolean {
   return true;
 }
 
+// --- Admin token store ---
+
+const adminTokens = new Map<string, number>(); // token -> expiresAt timestamp
+
+function createAdminToken(): string {
+  const token = crypto.randomUUID();
+  adminTokens.set(token, Date.now() + ADMIN_TOKEN_TTL_MS);
+  return token;
+}
+
+function isValidAdminToken(token: string): boolean {
+  const exp = adminTokens.get(token);
+  if (!exp) return false;
+  if (Date.now() > exp) {
+    adminTokens.delete(token);
+    return false;
+  }
+  return true;
+}
+
 // Clean up expired tokens every hour
 setInterval(() => {
   const now = Date.now();
   for (const [token, exp] of viewerTokens) {
     if (now > exp) viewerTokens.delete(token);
+  }
+  for (const [token, exp] of adminTokens) {
+    if (now > exp) adminTokens.delete(token);
   }
 }, 60 * 60 * 1000);
 
@@ -149,6 +174,22 @@ function requireViewerAuth(
   return false;
 }
 
+/** Check admin token from X-Admin-Token header. Returns true if authorized. */
+function requireAdminAuth(
+  request: { headers: Record<string, string | string[] | undefined> },
+  reply: { code: (n: number) => { send: (o: unknown) => void } }
+): boolean {
+  const token = request.headers["x-admin-token"];
+  if (typeof token === "string" && isValidAdminToken(token)) return true;
+
+  // API key also works as admin
+  const key = request.headers["x-api-key"];
+  if (API_KEY && key === API_KEY) return true;
+
+  reply.code(401).send({ error: "Admin-åtkomst krävs" });
+  return false;
+}
+
 // --- Routes ---
 
 // GET /api/auth/status — Check if PIN protection is active
@@ -156,19 +197,39 @@ app.get("/api/auth/status", async (_request, reply) => {
   return reply.send({ pinRequired: !!VIEWER_PIN });
 });
 
-// POST /api/auth/verify — Verify viewer PIN and return a session token
+// POST /api/auth/verify — Verify viewer or admin PIN and return session token(s)
 app.post<{ Body: { pin?: string } }>("/api/auth/verify", async (request, reply) => {
   if (!VIEWER_PIN) {
     // No PIN configured — return a token anyway
-    return reply.send({ token: createViewerToken() });
+    return reply.send({ token: createViewerToken(), role: "viewer" });
   }
 
   const { pin } = request.body || {};
+
+  // Check admin PIN first
+  if (pin && pin === ADMIN_PIN) {
+    const viewerTok = createViewerToken();
+    const adminTok = createAdminToken();
+    return reply.send({ token: viewerTok, role: "admin", adminToken: adminTok });
+  }
+
+  // Check viewer PIN
   if (!pin || pin !== VIEWER_PIN) {
     return reply.code(401).send({ error: "Fel kod" });
   }
 
   const token = createViewerToken();
+  return reply.send({ token, role: "viewer" });
+});
+
+// POST /api/auth/admin — Verify admin PIN and return an admin token
+app.post<{ Body: { pin?: string } }>("/api/auth/admin", async (request, reply) => {
+  const { pin } = request.body || {};
+  if (!pin || pin !== ADMIN_PIN) {
+    return reply.code(401).send({ error: "Fel admin-kod" });
+  }
+
+  const token = createAdminToken();
   return reply.send({ token });
 });
 
@@ -624,9 +685,9 @@ app.put<{ Params: { id: string }; Body: Partial<VodEntry> }>(
   }
 );
 
-// DELETE /api/vod/:id — Delete a VOD entry (admin, requires API key)
+// DELETE /api/vod/:id — Delete a VOD entry and its files (admin)
 app.delete<{ Params: { id: string } }>("/api/vod/:id", async (request, reply) => {
-  if (!requireApiKey(request, reply)) return;
+  if (!requireAdminAuth(request, reply)) return;
 
   const { id } = request.params;
   try {
@@ -635,12 +696,57 @@ app.delete<{ Params: { id: string } }>("/api/vod/:id", async (request, reply) =>
     if (filtered.length === entries.length) {
       return reply.code(404).send({ error: "Recording not found" });
     }
+
+    // Delete actual HLS files from MinIO
+    const deletedCount = await minio.deleteVodFiles(id);
+    request.log.info(`Deleted ${deletedCount} files for VOD ${id}`);
+
+    // Remove from index
     await minio.writeVodIndex(filtered);
     return reply.code(204).send();
   } catch (err) {
     request.log.error(err, "Failed to delete VOD entry");
     return reply.code(500).send({ error: "Failed to delete recording" });
   }
+});
+
+// --- Admin routes ---
+
+// GET /api/admin/storage — Get storage usage info (admin)
+app.get("/api/admin/storage", async (request, reply) => {
+  if (!requireAdminAuth(request, reply)) return;
+
+  try {
+    const entries = await minio.readVodIndex();
+    const stoppedEntries = entries.filter((e) => e.stoppedAt);
+    const storageInfo = await minio.getStorageInfo(stoppedEntries);
+
+    // Merge VOD metadata with size info
+    const vods = stoppedEntries
+      .map((entry) => {
+        const sizeInfo = storageInfo.vods.find((v) => v.id === entry.id);
+        return {
+          ...entry,
+          sizeBytes: sizeInfo?.sizeBytes || 0,
+        };
+      })
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+    return reply.send({
+      totalBytes: storageInfo.totalBytes,
+      vodCount: vods.length,
+      vods,
+    });
+  } catch (err) {
+    request.log.error(err, "Failed to get storage info");
+    return reply.code(500).send({ error: "Failed to get storage info" });
+  }
+});
+
+// GET /api/admin/verify — Check if admin token is still valid
+app.get("/api/admin/verify", async (request, reply) => {
+  if (!requireAdminAuth(request, reply)) return;
+  return reply.send({ ok: true });
 });
 
 // --- Health check ---
