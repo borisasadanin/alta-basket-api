@@ -96,7 +96,7 @@ setInterval(() => {
 // --- In-memory stream metadata ---
 
 const STOPPED_TTL_MS = 10 * 60 * 1000; // 10 minutes
-const streamMeta = new Map<string, { name: string; createdAt: string; stoppedAt?: string; deviceId?: string }>();
+const streamMeta = new Map<string, { name: string; createdAt: string; stoppedAt?: string; deviceId?: string; wasLive?: boolean }>();
 
 // --- Viewer tracking: streamId -> Map<ip, lastSeenTimestamp> ---
 
@@ -409,12 +409,35 @@ app.get("/api/streams", async (_request, reply) => {
           meta.stoppedAt = undefined;
         }
         const hlsLive = await restreamer.isHlsLive(streamId);
+
+        // Track whether stream was ever live
+        if (hlsLive && meta) {
+          meta.wasLive = true;
+        }
+
+        // If stream was previously live but HLS is gone → streamer stopped
+        let status: "live" | "waiting" | "stopped";
+        if (hlsLive) {
+          status = "live";
+        } else if (meta?.wasLive) {
+          // Was live before, now HLS is gone → stream ended
+          status = "stopped";
+          // Auto-mark as stopped in metadata
+          if (meta && !meta.stoppedAt) {
+            meta.stoppedAt = new Date().toISOString();
+            const dur = Math.round((new Date(meta.stoppedAt).getTime() - new Date(meta.createdAt).getTime()) / 1000);
+            minio.updateVodEntry(streamId, { stoppedAt: meta.stoppedAt, durationSeconds: dur }).catch(() => {});
+          }
+        } else {
+          status = "waiting";
+        }
+
         return {
           id: streamId,
           name: meta?.name || streamId,
           hlsUrl: restreamer.hlsUrl(streamId),
           createdAt: meta?.createdAt || "",
-          status: hlsLive ? "live" as const : "waiting" as const,
+          status,
           viewers: getViewerCount(streamId),
         };
       })
@@ -475,12 +498,33 @@ app.get<{ Params: { id: string } }>(
       }
 
       const hlsLive = await restreamer.isHlsLive(id);
+
+      // Track wasLive for accurate status
+      if (hlsLive && meta) {
+        meta.wasLive = true;
+      }
+
+      let status: "live" | "waiting" | "stopped";
+      if (hlsLive) {
+        status = "live";
+      } else if (meta?.wasLive) {
+        status = "stopped";
+        // Auto-mark as stopped
+        if (meta && !meta.stoppedAt) {
+          meta.stoppedAt = new Date().toISOString();
+          const dur = Math.round((new Date(meta.stoppedAt).getTime() - new Date(meta.createdAt).getTime()) / 1000);
+          minio.updateVodEntry(id, { stoppedAt: meta.stoppedAt, durationSeconds: dur }).catch(() => {});
+        }
+      } else {
+        status = "waiting";
+      }
+
       const info: StreamPublicInfo = {
         id,
         name: meta?.name || id,
         hlsUrl: restreamer.hlsUrl(id),
         createdAt: meta?.createdAt || "",
-        status: hlsLive ? "live" : "waiting",
+        status,
         viewers: getViewerCount(id),
       };
 
@@ -677,8 +721,9 @@ app.get("/api/vod", async (request, reply) => {
   try {
     const entries = await minio.readVodIndex();
     // Sort by date descending (newest first), only return completed recordings
+    // Filter out entries shorter than 10s (likely no actual recording data)
     const sorted = entries
-      .filter((e) => e.stoppedAt)
+      .filter((e) => e.stoppedAt && (e.durationSeconds === undefined || e.durationSeconds >= 10))
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     return reply.send(sorted);
   } catch (err) {
