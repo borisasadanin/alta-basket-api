@@ -256,19 +256,24 @@ app.post<{ Body: CreateStreamBody }>("/api/streams", async (request, reply) => {
 
   const { name, deviceId } = request.body || {};
   if (!name || typeof name !== "string" || name.trim().length === 0) {
-    return reply.code(400).send({ error: 'Missing "name" field' });
+    return reply.code(400).send({ error: "missing_name", message: "Namn saknas" });
   }
 
-  // Ensure Restreamer instance is running (starts it if needed)
-  try {
-    const instanceInfo = await oscManager.ensureRunning();
-    restreamer.rtmpHost = instanceInfo.rtmpHost;
-  } catch (err) {
-    request.log.error(err, "Failed to start Restreamer instance");
-    return reply.code(503).send({
-      error: "Streaming service is starting up. Please try again in a moment.",
+  // Check that Restreamer is running — do NOT block waiting for startup
+  const oscState = oscManager.getState();
+  const oscInfo = oscManager.getInfo();
+  if (oscState !== "running" || !oscInfo) {
+    const stateMessages: Record<string, string> = {
+      stopped: "Restreamer är inte startad. Starta den först via appen.",
+      starting: "Restreamer startar. Vänta tills den är redo och försök igen.",
+      stopping: "Restreamer håller på att stängas ner. Vänta en stund och försök igen.",
+    };
+    return reply.code(409).send({
+      error: "restreamer_not_ready",
+      message: stateMessages[oscState] || "Restreamer är inte redo.",
     });
   }
+  restreamer.rtmpHost = oscInfo.rtmpHost;
 
   const displayName = `${name.trim()} kamera`;
 
@@ -341,7 +346,10 @@ app.post<{ Body: CreateStreamBody }>("/api/streams", async (request, reply) => {
     return reply.code(201).send(info);
   } catch (err) {
     request.log.error(err, "Failed to create stream");
-    return reply.code(500).send({ error: "Failed to create stream" });
+    return reply.code(500).send({
+      error: "stream_creation_failed",
+      message: "Kunde inte skapa strömmen. Försök igen.",
+    });
   }
 });
 
@@ -349,23 +357,42 @@ app.post<{ Body: CreateStreamBody }>("/api/streams", async (request, reply) => {
 app.get("/api/streams", async (_request, reply) => {
   if (!requireViewerAuth(_request, reply)) return;
 
-  // If Restreamer is not running, only return stopped metadata
-  if (oscManager.getState() === "stopped") {
+  const restreamerState = oscManager.getState();
+  const restreamerAvailable = restreamerState === "running" || restreamerState === "stopping";
+
+  // Helper: build list from metadata only (when Restreamer is unavailable)
+  function metadataOnlyStreams(): StreamPublicInfo[] {
     const streams: StreamPublicInfo[] = [];
     const now = Date.now();
     for (const [streamId, meta] of streamMeta) {
-      if (!meta.stoppedAt) continue;
-      if (now - new Date(meta.stoppedAt).getTime() > STOPPED_TTL_MS) continue;
-      streams.push({
-        id: streamId,
-        name: meta.name,
-        hlsUrl: restreamer.hlsUrl(streamId),
-        createdAt: meta.createdAt,
-        status: "stopped",
-        viewers: 0,
-      });
+      if (meta.stoppedAt) {
+        if (now - new Date(meta.stoppedAt).getTime() > STOPPED_TTL_MS) continue;
+        streams.push({
+          id: streamId,
+          name: meta.name,
+          hlsUrl: restreamer.hlsUrl(streamId),
+          createdAt: meta.createdAt,
+          status: "stopped",
+          viewers: 0,
+        });
+      } else {
+        // Active metadata but Restreamer unreachable — show as "waiting" (not "live")
+        streams.push({
+          id: streamId,
+          name: meta.name,
+          hlsUrl: restreamer.hlsUrl(streamId),
+          createdAt: meta.createdAt,
+          status: "waiting",
+          viewers: getViewerCount(streamId),
+        });
+      }
     }
-    return reply.send(streams);
+    return streams;
+  }
+
+  // If Restreamer is not running, return metadata-only list
+  if (!restreamerAvailable) {
+    return reply.send(metadataOnlyStreams());
   }
 
   try {
@@ -393,7 +420,7 @@ app.get("/api/streams", async (_request, reply) => {
       })
     );
 
-    // Stopped streams (metadata with stoppedAt, within 1h)
+    // Stopped streams (metadata with stoppedAt, within TTL)
     const now = Date.now();
     for (const [streamId, meta] of streamMeta) {
       if (activeIds.has(streamId) || !meta.stoppedAt) continue;
@@ -410,8 +437,9 @@ app.get("/api/streams", async (_request, reply) => {
 
     return reply.send(streams);
   } catch (err) {
-    _request.log.error(err, "Failed to list streams");
-    return reply.code(500).send({ error: "Failed to list streams" });
+    // Restreamer API failed (crashed/503/504) — fall back to metadata
+    _request.log.error(err, "Restreamer API unavailable, falling back to cached metadata");
+    return reply.send(metadataOnlyStreams());
   }
 });
 
@@ -579,24 +607,44 @@ setInterval(cleanupStaleStreams, 60_000);
 
 // --- Restreamer admin routes ---
 
-// GET /api/restreamer/status — Check Restreamer instance state (with liveness verification)
+// GET /api/restreamer/status — Return cached state instantly (background polling keeps it fresh)
 app.get("/api/restreamer/status", async (request, reply) => {
   if (!requireApiKey(request, reply)) return;
-  // When state is "running", do a quick liveness check to catch crashed/unreachable instances
-  const state = await oscManager.quickCheck();
-  return reply.send({
-    state,
-    info: oscManager.getInfo(),
-  });
+  const { state, info } = oscManager.getCachedState();
+  return reply.send({ state, info });
 });
 
-// POST /api/restreamer/start — Trigger Restreamer instance start (non-blocking)
+// POST /api/restreamer/start — Trigger Restreamer instance start (non-blocking, with crash recovery)
 app.post("/api/restreamer/start", async (request, reply) => {
   if (!requireApiKey(request, reply)) return;
   const currentState = oscManager.getState();
+
   if (currentState === "running") {
-    return reply.send({ state: "running", info: oscManager.getInfo() });
+    // Verify it's actually alive — if not, force-recreate in background
+    const alive = await oscManager.quickHealthProbe();
+    if (alive) {
+      return reply.send({ state: "running", message: "Restreamer körs", info: oscManager.getInfo() });
+    }
+    // Broken instance — force-recreate in background
+    request.log.info("Restreamer reports running but is unresponsive, force-recreating...");
+    oscManager.forceRecreate().then((info) => {
+      restreamer.rtmpHost = info.rtmpHost;
+    }).catch((err) => {
+      request.log.error(err, "Background Restreamer force-recreate failed");
+    });
+    return reply.send({ state: "starting", message: "Restreamer svarar inte, återskapar..." });
   }
+
+  if (currentState === "stopping") {
+    // Grace period active — cancel it and stay running
+    oscManager.ensureRunning().then((info) => {
+      restreamer.rtmpHost = info.rtmpHost;
+    }).catch((err) => {
+      request.log.error(err, "Background Restreamer start failed");
+    });
+    return reply.send({ state: "starting", message: "Avbryter nedstängning, startar om..." });
+  }
+
   if (currentState !== "starting") {
     // Fire and forget — client polls /status to track progress
     oscManager.ensureRunning().then((info) => {
@@ -605,7 +653,7 @@ app.post("/api/restreamer/start", async (request, reply) => {
       request.log.error(err, "Background Restreamer start failed");
     });
   }
-  return reply.send({ state: "starting" });
+  return reply.send({ state: "starting", message: "Restreamer startar..." });
 });
 
 // DELETE /api/restreamer/stop — Force-stop Restreamer instance
@@ -761,6 +809,9 @@ try {
 } catch (err) {
   console.error("Failed to initialize MinIO bucket (VOD will be unavailable):", err);
 }
+
+// Start background health polling for Restreamer
+oscManager.startBackgroundPolling();
 
 try {
   await app.listen({ port: PORT, host: "0.0.0.0" });

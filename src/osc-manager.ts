@@ -45,6 +45,8 @@ export class OscInstanceManager {
   private cachedInfo: InstanceInfo | null = null;
   private activeStreamCount = 0;
   private s3Config?: S3StorageConfig;
+  private bgPollTimer: ReturnType<typeof setInterval> | null = null;
+  private bgPollRunning = false;
 
   constructor(opts: OscManagerOptions) {
     this.ctx = new Context();
@@ -62,6 +64,87 @@ export class OscInstanceManager {
 
   getInfo(): InstanceInfo | null {
     return this.cachedInfo;
+  }
+
+  /** Returns cached state + info instantly (no network calls). */
+  getCachedState(): { state: InstanceState; info: InstanceInfo | null } {
+    return { state: this.state, info: this.cachedInfo };
+  }
+
+  /** Start background health polling (every 15s). Call once at server startup. */
+  startBackgroundPolling(): void {
+    if (this.bgPollTimer) return;
+    this.bgPollTimer = setInterval(() => {
+      if (this.bgPollRunning) return; // Skip if previous poll still running
+      this.bgPollRunning = true;
+      this.backgroundHealthCheck()
+        .catch((err) => this.log.error(err, "Background health poll error"))
+        .finally(() => { this.bgPollRunning = false; });
+    }, 15_000);
+    // Run initial check immediately
+    this.backgroundHealthCheck().catch(() => {});
+  }
+
+  stopBackgroundPolling(): void {
+    if (this.bgPollTimer) {
+      clearInterval(this.bgPollTimer);
+      this.bgPollTimer = null;
+    }
+  }
+
+  /** Quick liveness probe (3s timeout). Returns true if Restreamer API responds OK. */
+  async quickHealthProbe(): Promise<boolean> {
+    if (!this.cachedInfo) return false;
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3000);
+      const sat = await this.ctx.getServiceAccessToken(SERVICE_ID);
+      const res = await fetch(`${this.cachedInfo.url}/api/v3/process`, {
+        headers: { Authorization: `Bearer ${sat}` },
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Force-remove the existing instance and recreate it from scratch.
+   * Use when the instance exists but is broken/unresponsive.
+   */
+  async forceRecreate(): Promise<InstanceInfo> {
+    this.cancelGracePeriod();
+    this.log.info("Force-recreating Restreamer instance...");
+
+    // Remove existing instance (ignore errors — it might already be gone)
+    try {
+      const sat = await this.ctx.getServiceAccessToken(SERVICE_ID);
+      await removeInstance(this.ctx, SERVICE_ID, this.instanceName, sat);
+      this.log.info(`Removed broken instance "${this.instanceName}"`);
+    } catch (err) {
+      this.log.error(err, "Failed to remove instance during recreate (continuing)");
+    }
+
+    // Reset state
+    this.state = "starting";
+    this.cachedInfo = null;
+    this.startPromise = null;
+
+    // Create fresh
+    this.startPromise = this.startInstance();
+    try {
+      const info = await this.startPromise;
+      this.cachedInfo = info;
+      this.state = "running";
+      return info;
+    } catch (err) {
+      this.state = "stopped";
+      this.startPromise = null;
+      this.cachedInfo = null;
+      throw err;
+    }
   }
 
   async ensureRunning(): Promise<InstanceInfo> {
@@ -202,10 +285,11 @@ export class OscInstanceManager {
   }
 
   /**
-   * Quick liveness check — returns true if Restreamer API is responsive.
+   * Background liveness check — verifies Restreamer API is responsive.
    * If state is "running" but the instance is unreachable, resets to "stopped".
+   * Called automatically by background polling timer.
    */
-  async quickCheck(): Promise<InstanceState> {
+  private async backgroundHealthCheck(): Promise<InstanceState> {
     // If we think it's stopped, check if the instance actually exists in OSC
     // (handles backend restart where in-memory state is lost)
     if (this.state === "stopped" && !this.cachedInfo) {
