@@ -319,13 +319,12 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
       viewers.delete(id);
       oscManager.streamEnded();
 
-      // Try to delete the Restreamer process (best-effort — may fail if Restreamer is down)
-      try {
-        await restreamer.deleteProcess(id);
-      } catch (err) {
+      // Delete the Restreamer process in the background (fire-and-forget).
+      // Metadata is already updated, so the response returns instantly.
+      // The cleanup timer will catch any stragglers.
+      restreamer.deleteProcess(id).catch((err) => {
         request.log.warn(err, `Could not delete Restreamer process for ${id} (may already be stopped)`);
-        // Don't fail the request — metadata is already updated
-      }
+      });
 
       return reply.code(204).send();
     }
