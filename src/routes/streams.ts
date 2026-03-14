@@ -292,29 +292,33 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
       if (!requireApiKey(request, reply)) return;
 
       const { id } = request.params;
+
+      // Always update metadata first (even if Restreamer is unreachable)
+      const meta = streamMeta.get(id);
+      const stoppedAt = new Date().toISOString();
+      if (meta) {
+        meta.stoppedAt = stoppedAt;
+
+        // Finalize VOD entry with stop time and duration
+        const durationSeconds = Math.round(
+          (new Date(stoppedAt).getTime() - new Date(meta.createdAt).getTime()) / 1000
+        );
+        minio.updateVodEntry(id, { stoppedAt, durationSeconds }).catch((err) => {
+          request.log.error(err, "Failed to finalize VOD entry");
+        });
+      }
+      viewers.delete(id);
+      oscManager.streamEnded();
+
+      // Try to delete the Restreamer process (best-effort — may fail if Restreamer is down)
       try {
         await restreamer.deleteProcess(id);
-        // Keep metadata with stoppedAt so it shows as "stopped" for TTL
-        const meta = streamMeta.get(id);
-        const stoppedAt = new Date().toISOString();
-        if (meta) {
-          meta.stoppedAt = stoppedAt;
-
-          // Finalize VOD entry with stop time and duration
-          const durationSeconds = Math.round(
-            (new Date(stoppedAt).getTime() - new Date(meta.createdAt).getTime()) / 1000
-          );
-          minio.updateVodEntry(id, { stoppedAt, durationSeconds }).catch((err) => {
-            request.log.error(err, "Failed to finalize VOD entry");
-          });
-        }
-        viewers.delete(id);
-        oscManager.streamEnded();
-        return reply.code(204).send();
       } catch (err) {
-        request.log.error(err, "Failed to delete stream");
-        return reply.code(500).send({ error: "Failed to delete stream" });
+        request.log.warn(err, `Could not delete Restreamer process for ${id} (may already be stopped)`);
+        // Don't fail the request — metadata is already updated
       }
+
+      return reply.code(204).send();
     }
   );
 
