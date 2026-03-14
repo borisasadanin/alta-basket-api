@@ -20,8 +20,17 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
       return reply.code(400).send({ error: "missing_name", message: "Namn saknas" });
     }
 
-    // Check that Restreamer is running — do NOT block waiting for startup
-    const oscState = oscManager.getState();
+    // Ensure Restreamer is available — cancel grace period if stopping
+    let oscState = oscManager.getState();
+    if (oscState === "stopping") {
+      // Grace period active but Restreamer is still running — cancel shutdown
+      try {
+        await oscManager.ensureRunning();
+        oscState = oscManager.getState();
+      } catch {
+        // Fall through to state check below
+      }
+    }
     const oscInfo = oscManager.getInfo();
     if (oscState !== "running" || !oscInfo) {
       const stateMessages: Record<string, string> = {
