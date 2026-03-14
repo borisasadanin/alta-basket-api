@@ -5,7 +5,7 @@ import rateLimit from "@fastify/rate-limit";
 
 import { config, validateConfig } from "./config.js";
 import { startTokenCleanup } from "./auth.js";
-import { initServices, streamMeta } from "./state.js";
+import { initServices } from "./state.js";
 import { RestreamerClient } from "./restreamer.js";
 import { OscInstanceManager } from "./osc-manager.js";
 import { MinioClient } from "./minio.js";
@@ -77,7 +77,7 @@ app.get("/health", async () => {
       restreamer: restreamerState,
       minio: minioReachable ? "ok" : "unreachable",
     },
-    activeStreams: streamMeta.size,
+    activeStreams: oscManager.getActiveStreamCount(),
     uptime: process.uptime(),
   };
 });

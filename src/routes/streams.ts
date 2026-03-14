@@ -20,53 +20,53 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
       return reply.code(400).send({ error: "missing_name", message: "Namn saknas" });
     }
 
-    // Ensure Restreamer is available — cancel grace period if stopping
+    // Ensure Restreamer is available
     let oscState = oscManager.getState();
     if (oscState === "stopping") {
-      // Grace period active but Restreamer is still running — cancel shutdown
+      // Grace period active — instant cancel, Restreamer is still running
       try {
         await oscManager.ensureRunning();
         oscState = oscManager.getState();
       } catch {
         // Fall through to state check below
       }
+    } else if (oscState === "stopped") {
+      // Restreamer is fully stopped — kick off start in background (takes 1-3 min)
+      // Don't block the request; return 409 and let the client retry
+      oscManager.ensureRunning().catch((err) => {
+        app.log.error(err, "Background Restreamer start failed");
+      });
+      return reply.code(409).send({
+        error: "restreamer_not_ready",
+        message: "Sändningsmotorn startar automatiskt. Försök igen om ca 1 minut.",
+      });
     }
     const oscInfo = oscManager.getInfo();
     if (oscState !== "running" || !oscInfo) {
       const stateMessages: Record<string, string> = {
-        stopped: "Restreamer är inte startad. Starta den först via appen.",
-        starting: "Restreamer startar. Vänta tills den är redo och försök igen.",
-        stopping: "Restreamer håller på att stängas ner. Vänta en stund och försök igen.",
+        starting: "Sändningsmotorn startar. Vänta tills den är redo och försök igen (~1 min).",
+        stopping: "Sändningsmotorn håller på att stängas ner. Försök igen om en stund.",
       };
       return reply.code(409).send({
         error: "restreamer_not_ready",
-        message: stateMessages[oscState] || "Restreamer är inte redo.",
+        message: stateMessages[oscState] || "Sändningsmotorn är inte redo.",
       });
     }
     restreamer.rtmpHost = oscInfo.rtmpHost;
 
     const displayName = `${name.trim()} kamera`;
 
-    // If deviceId provided, look for an existing stream from this device with same name
+    // If deviceId provided, reconnect to an ACTIVE (non-stopped) stream from same device
     if (deviceId) {
       for (const [existingId, meta] of streamMeta) {
         if (meta.deviceId !== deviceId || meta.name !== displayName) continue;
 
-        // Found a stream from this device with same name — reuse it
-        if (meta.stoppedAt) {
-          // Was stopped — recreate Restreamer process with same ID
-          try {
-            await restreamer.createProcess(existingId, { recording: true });
-          } catch {
-            // Process might still exist, ignore
-          }
-          meta.stoppedAt = undefined;
-          meta.createdAt = new Date().toISOString();
-        }
+        // Only reconnect to active streams — stopped streams always create a new one
+        // to avoid overwriting previous recordings in MinIO
+        if (meta.stoppedAt) continue;
 
         oscManager.streamStarted();
 
-        // Return existing stream info (whether it was stopped or still active)
         const info: StreamInfo = {
           id: existingId,
           name: meta.name,
@@ -408,4 +408,38 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
   }
 
   setInterval(cleanupStaleStreams, 60_000);
+
+  // --- Finalize orphaned VOD entries ---
+  // Entries without stoppedAt that are older than 1 hour are likely from
+  // crashed streams or backend restarts. Mark them as finished.
+  async function finalizeOrphanedVods(): Promise<void> {
+    try {
+      const entries = await minio.readVodIndex();
+      const now = Date.now();
+      const ONE_HOUR = 60 * 60 * 1000;
+      let updated = false;
+
+      for (const entry of entries) {
+        if (entry.stoppedAt) continue;
+        const ageMs = now - new Date(entry.createdAt).getTime();
+        if (ageMs < ONE_HOUR) continue;
+
+        // This entry is orphaned — mark as finalized so it appears in VOD list.
+        // Duration is unknown, so leave durationSeconds undefined (passes the VOD filter).
+        entry.stoppedAt = entry.createdAt;
+        updated = true;
+        app.log.info(`Finalized orphaned VOD entry ${entry.id} (age: ${Math.round(ageMs / 60000)} min)`);
+      }
+
+      if (updated) {
+        await minio.writeVodIndex(entries);
+      }
+    } catch (err) {
+      app.log.error(err, "VOD orphan cleanup error");
+    }
+  }
+
+  // Run orphan cleanup on startup (after 10s delay) and then every 30 minutes
+  setTimeout(finalizeOrphanedVods, 10_000);
+  setInterval(finalizeOrphanedVods, 30 * 60 * 1000);
 }

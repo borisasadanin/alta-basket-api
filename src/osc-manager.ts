@@ -191,9 +191,17 @@ export class OscInstanceManager {
     }
   }
 
+  getActiveStreamCount(): number {
+    return this.activeStreamCount;
+  }
+
   streamStarted(): void {
     this.activeStreamCount++;
     this.cancelGracePeriod();
+    // Ensure state is consistent — if we have active streams, we must be running
+    if (this.cachedInfo && this.state !== "running" && this.state !== "starting") {
+      this.state = "running";
+    }
   }
 
   streamEnded(): void {
