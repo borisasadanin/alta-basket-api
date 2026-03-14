@@ -4,8 +4,9 @@
  */
 export function determineStreamStatus(
   hlsLive: boolean,
-  meta?: { wasLive?: boolean; stoppedAt?: string }
-): "live" | "waiting" | "stopped" {
+  meta?: { wasLive?: boolean; stoppedAt?: string; pausedAt?: string }
+): "live" | "waiting" | "stopped" | "paused" {
+  if (meta?.pausedAt) return "paused";
   if (hlsLive) return "live";
   if (meta?.wasLive) return "stopped";
   return "waiting";

@@ -44,6 +44,7 @@ export class OscInstanceManager {
   private gracePeriodTimer: ReturnType<typeof setTimeout> | null = null;
   private cachedInfo: InstanceInfo | null = null;
   private activeStreamCount = 0;
+  private pausedStreamCount = 0;
   private s3Config?: S3StorageConfig;
   private bgPollTimer: ReturnType<typeof setInterval> | null = null;
   private bgPollRunning = false;
@@ -204,9 +205,32 @@ export class OscInstanceManager {
     }
   }
 
+  streamPaused(): void {
+    this.activeStreamCount = Math.max(0, this.activeStreamCount - 1);
+    this.pausedStreamCount++;
+    // Don't start grace period — paused streams keep Restreamer alive
+  }
+
+  streamResumed(): void {
+    this.pausedStreamCount = Math.max(0, this.pausedStreamCount - 1);
+    this.activeStreamCount++;
+    this.cancelGracePeriod();
+    if (this.cachedInfo && this.state !== "running" && this.state !== "starting") {
+      this.state = "running";
+    }
+  }
+
   streamEnded(): void {
     this.activeStreamCount = Math.max(0, this.activeStreamCount - 1);
-    if (this.activeStreamCount === 0 && this.state === "running") {
+    if (this.activeStreamCount === 0 && this.pausedStreamCount === 0 && this.state === "running") {
+      this.startGracePeriod();
+    }
+  }
+
+  /** Called when a paused stream is stopped (not resumed) */
+  pausedStreamEnded(): void {
+    this.pausedStreamCount = Math.max(0, this.pausedStreamCount - 1);
+    if (this.activeStreamCount === 0 && this.pausedStreamCount === 0 && this.state === "running") {
       this.startGracePeriod();
     }
   }
@@ -214,7 +238,7 @@ export class OscInstanceManager {
   syncActiveCount(count: number): void {
     const prev = this.activeStreamCount;
     this.activeStreamCount = Math.max(0, count);
-    if (prev > 0 && this.activeStreamCount === 0 && this.state === "running") {
+    if (prev > 0 && this.activeStreamCount === 0 && this.pausedStreamCount === 0 && this.state === "running") {
       this.startGracePeriod();
     }
   }
@@ -235,6 +259,7 @@ export class OscInstanceManager {
     this.cachedInfo = null;
     this.startPromise = null;
     this.activeStreamCount = 0;
+    this.pausedStreamCount = 0;
   }
 
   // --- Internal ---
@@ -481,7 +506,7 @@ export class OscInstanceManager {
 
     this.gracePeriodTimer = setTimeout(async () => {
       this.gracePeriodTimer = null;
-      if (this.activeStreamCount > 0) {
+      if (this.activeStreamCount > 0 || this.pausedStreamCount > 0) {
         this.state = "running";
         return;
       }

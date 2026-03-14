@@ -88,9 +88,10 @@ export class RestreamerClient {
 
   async createProcess(
     streamId: string,
-    options?: { recording?: boolean }
+    options?: { recording?: boolean; partNumber?: number }
   ): Promise<RestreamerProcess> {
     const processId = `${PROCESS_PREFIX}${streamId}`;
+    const part = options?.partNumber ?? 1;
 
     const outputs: { id: string; address: string; options: string[] }[] = [
       {
@@ -114,7 +115,7 @@ export class RestreamerClient {
     if (options?.recording) {
       outputs.push({
         id: "recording",
-        address: `{fs:minio}/${streamId}/index.m3u8`,
+        address: `{fs:minio}/${streamId}/p${part}.m3u8`,
         options: [
           "-codec",
           "copy",
@@ -127,7 +128,7 @@ export class RestreamerClient {
           "-hls_flags",
           "append_list+program_date_time",
           "-hls_segment_filename",
-          `{fs:minio}/${streamId}/seg_%05d.ts`,
+          `{fs:minio}/${streamId}/p${part}_seg_%05d.ts`,
           "-method",
           "PUT",
         ],

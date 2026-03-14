@@ -8,6 +8,8 @@ import { requireApiKey, requireViewerAuth } from "../auth.js";
 import { streamMeta, restreamer, minio, oscManager } from "../state.js";
 import { getViewerCount, registerViewer, viewers } from "../viewer-tracking.js";
 import { determineStreamStatus } from "../stream-status.js";
+import { uploadPauseSegments } from "../pause-segments.js";
+import { stitchPlaylist, buildPartList } from "../playlist-stitcher.js";
 import type { CreateStreamBody, StreamInfo, StreamPublicInfo, VodEntry } from "../types.js";
 
 export default async function streamRoutes(app: FastifyInstance): Promise<void> {
@@ -82,7 +84,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
     const streamId = crypto.randomUUID().slice(0, 8);
 
     try {
-      await restreamer.createProcess(streamId, { recording: true });
+      await restreamer.createProcess(streamId, { recording: true, partNumber: 1 });
 
       oscManager.streamStarted();
 
@@ -94,7 +96,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
         createdAt: new Date().toISOString(),
       };
 
-      streamMeta.set(streamId, { name: displayName, createdAt: info.createdAt, deviceId });
+      streamMeta.set(streamId, { name: displayName, createdAt: info.createdAt, deviceId, partNumber: 1, completedParts: [] });
 
       // Create VOD entry with match metadata from request
       const homeTeam = team || "Älta IF";
@@ -125,6 +127,95 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
     }
   });
 
+  // PATCH /api/streams/:id/pause — Pause a live stream
+  app.patch<{ Params: { id: string } }>("/api/streams/:id/pause", async (request, reply) => {
+    if (!requireApiKey(request, reply)) return;
+
+    const { id } = request.params;
+    const meta = streamMeta.get(id);
+
+    if (!meta) {
+      return reply.code(404).send({ error: "not_found", message: "Strömmen hittades inte" });
+    }
+    if (meta.stoppedAt) {
+      return reply.code(409).send({ error: "already_stopped", message: "Strömmen är redan stoppad" });
+    }
+    if (meta.pausedAt) {
+      return reply.code(409).send({ error: "already_paused", message: "Strömmen är redan pausad" });
+    }
+
+    meta.pausedAt = new Date().toISOString();
+    meta.completedParts.push(meta.partNumber);
+
+    // Upload pause marker segments (fire-and-forget, with logging)
+    const pauseNumber = meta.partNumber;
+    uploadPauseSegments(minio, id, pauseNumber).catch((err) => {
+      request.log.error(err, `Failed to upload pause segments for ${id}`);
+    });
+
+    // Delete the Restreamer process (it will die anyway after 120s timeout)
+    restreamer.deleteProcess(id).catch((err) => {
+      request.log.warn(err, `Could not delete Restreamer process for ${id} during pause`);
+    });
+
+    oscManager.streamPaused();
+
+    return reply.code(200).send({ status: "paused", pausedAt: meta.pausedAt });
+  });
+
+  // PATCH /api/streams/:id/resume — Resume a paused stream
+  app.patch<{ Params: { id: string } }>("/api/streams/:id/resume", async (request, reply) => {
+    if (!requireApiKey(request, reply)) return;
+
+    const { id } = request.params;
+    const meta = streamMeta.get(id);
+
+    if (!meta) {
+      return reply.code(404).send({ error: "not_found", message: "Strömmen hittades inte" });
+    }
+    if (!meta.pausedAt) {
+      return reply.code(409).send({ error: "not_paused", message: "Strömmen är inte pausad" });
+    }
+    if (meta.stoppedAt) {
+      return reply.code(409).send({ error: "already_stopped", message: "Strömmen är redan stoppad" });
+    }
+
+    // Ensure Restreamer is running
+    const oscState = oscManager.getState();
+    const oscInfo = oscManager.getInfo();
+    if (oscState !== "running" || !oscInfo) {
+      return reply.code(409).send({
+        error: "restreamer_not_ready",
+        message: "Sändningsmotorn är inte redo. Försök igen.",
+      });
+    }
+    restreamer.rtmpHost = oscInfo.rtmpHost;
+
+    // Increment part number for new recording segment
+    meta.partNumber++;
+    meta.pausedAt = undefined;
+
+    try {
+      await restreamer.createProcess(id, { recording: true, partNumber: meta.partNumber });
+      oscManager.streamResumed();
+
+      return reply.code(200).send({
+        status: "resumed",
+        rtmpUrl: restreamer.rtmpUrl(id),
+        partNumber: meta.partNumber,
+      });
+    } catch (err) {
+      // Rollback
+      meta.partNumber--;
+      meta.pausedAt = new Date().toISOString();
+      request.log.error(err, "Failed to create Restreamer process on resume");
+      return reply.code(500).send({
+        error: "resume_failed",
+        message: "Kunde inte återuppta strömmen. Försök igen.",
+      });
+    }
+  });
+
   // GET /api/streams — List active + recently stopped streams
   app.get("/api/streams", async (_request, reply) => {
     if (!requireViewerAuth(_request, reply)) return;
@@ -146,6 +237,15 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
             createdAt: meta.createdAt,
             status: "stopped",
             viewers: 0,
+          });
+        } else if (meta.pausedAt) {
+          streams.push({
+            id: streamId,
+            name: meta.name,
+            hlsUrl: restreamer.hlsUrl(streamId),
+            createdAt: meta.createdAt,
+            status: "paused",
+            viewers: getViewerCount(streamId),
           });
         } else {
           // Active metadata but Restreamer unreachable — show as "waiting" (not "live")
@@ -222,6 +322,19 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
         });
       }
 
+      // Paused streams (metadata with pausedAt, no active Restreamer process)
+      for (const [streamId, meta] of streamMeta) {
+        if (activeIds.has(streamId) || !meta.pausedAt || meta.stoppedAt) continue;
+        streams.push({
+          id: streamId,
+          name: meta.name,
+          hlsUrl: restreamer.hlsUrl(streamId),
+          createdAt: meta.createdAt,
+          status: "paused",
+          viewers: getViewerCount(streamId),
+        });
+      }
+
       return reply.send(streams);
     } catch (err) {
       // Restreamer API failed (crashed/503/504) — fall back to metadata
@@ -254,6 +367,18 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
             } satisfies StreamPublicInfo);
           }
           return reply.code(404).send({ error: "Stream not found" });
+        }
+
+        // Check if paused
+        if (meta?.pausedAt && !meta.stoppedAt) {
+          return reply.send({
+            id,
+            name: meta.name,
+            hlsUrl: restreamer.hlsUrl(id),
+            createdAt: meta.createdAt,
+            status: "paused",
+            viewers: getViewerCount(id),
+          } satisfies StreamPublicInfo);
         }
 
         const process = await restreamer.getProcess(id);
@@ -304,6 +429,8 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
 
       // Always update metadata first (even if Restreamer is unreachable)
       const meta = streamMeta.get(id);
+      // If stream has multiple parts (was paused at least once), stitch the playlist
+      const wasPaused = !!meta?.pausedAt;
       const stoppedAt = new Date().toISOString();
       if (meta) {
         meta.stoppedAt = stoppedAt;
@@ -317,7 +444,11 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
         });
       }
       viewers.delete(id);
-      oscManager.streamEnded();
+      if (wasPaused) {
+        oscManager.pausedStreamEnded();
+      } else {
+        oscManager.streamEnded();
+      }
 
       // Delete the Restreamer process in the background (fire-and-forget).
       // Metadata is already updated, so the response returns instantly.
@@ -325,6 +456,14 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
       restreamer.deleteProcess(id).catch((err) => {
         request.log.warn(err, `Could not delete Restreamer process for ${id} (may already be stopped)`);
       });
+
+      // Stitch multi-part playlist if stream had recordings
+      if (meta && (meta.completedParts.length > 0 || meta.partNumber > 1)) {
+        const parts = buildPartList(meta.completedParts, meta.partNumber);
+        stitchPlaylist(minio, id, parts).catch((err) => {
+          request.log.error(err, `Failed to stitch playlist for ${id}`);
+        });
+      }
 
       return reply.code(204).send();
     }
@@ -364,6 +503,9 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
         const streamId = p.config.id.replace("alta-", "");
         const meta = streamMeta.get(streamId);
         const ageMs = meta ? Date.now() - new Date(meta.createdAt).getTime() : 0;
+
+        // Skip paused streams — they intentionally have no active Restreamer process
+        if (meta?.pausedAt && !meta.stoppedAt) continue;
 
         // Delete finished/failed processes (RTMP timed out or errored)
         if (state === "finished" || state === "failed") {
@@ -427,6 +569,14 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
         // This entry is orphaned — mark as finalized so it appears in VOD list.
         // Duration is unknown, so leave durationSeconds undefined (passes the VOD filter).
         entry.stoppedAt = entry.createdAt;
+        // Try to stitch multi-part recording for orphaned stream
+        const orphanMeta = streamMeta.get(entry.id);
+        if (orphanMeta && (orphanMeta.completedParts.length > 0 || orphanMeta.partNumber > 1)) {
+          const parts = buildPartList(orphanMeta.completedParts, orphanMeta.partNumber);
+          stitchPlaylist(minio, entry.id, parts).catch((err) => {
+            app.log.error(err, `Failed to stitch orphaned playlist for ${entry.id}`);
+          });
+        }
         updated = true;
         app.log.info(`Finalized orphaned VOD entry ${entry.id} (age: ${Math.round(ageMs / 60000)} min)`);
       }

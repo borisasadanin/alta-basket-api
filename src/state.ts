@@ -11,6 +11,12 @@ export interface StreamMeta {
   stoppedAt?: string;
   deviceId?: string;
   wasLive?: boolean;
+  /** ISO timestamp when stream was paused (undefined = not paused) */
+  pausedAt?: string;
+  /** Current recording part number (starts at 1, increments on each resume) */
+  partNumber: number;
+  /** List of completed part numbers (for playlist stitching on stop) */
+  completedParts: number[];
 }
 
 /** In-memory stream metadata */

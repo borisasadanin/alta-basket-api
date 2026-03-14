@@ -21,4 +21,15 @@ describe("determineStreamStatus", () => {
     expect(determineStreamStatus(false, { wasLive: false })).toBe("waiting");
     expect(determineStreamStatus(false, {})).toBe("waiting");
   });
+
+  it('returns "paused" when pausedAt is set, regardless of hlsLive', () => {
+    expect(determineStreamStatus(false, { pausedAt: "2024-01-01T00:00:00Z" })).toBe("paused");
+    expect(determineStreamStatus(true, { pausedAt: "2024-01-01T00:00:00Z" })).toBe("paused");
+    expect(determineStreamStatus(false, { pausedAt: "2024-01-01T00:00:00Z", wasLive: true })).toBe("paused");
+  });
+
+  it('"paused" takes priority over "live" and "stopped"', () => {
+    expect(determineStreamStatus(true, { pausedAt: "2024-01-01T00:00:00Z", wasLive: true })).toBe("paused");
+    expect(determineStreamStatus(false, { pausedAt: "2024-01-01T00:00:00Z", stoppedAt: "2024-01-01T01:00:00Z" })).toBe("paused");
+  });
 });

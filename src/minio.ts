@@ -181,6 +181,30 @@ export class MinioClient {
     return { totalBytes, vods };
   }
 
+  /** Upload a raw buffer to a key in the recordings bucket */
+  async uploadBuffer(key: string, body: Buffer | string, contentType: string): Promise<void> {
+    await this.s3.send(
+      new PutObjectCommand({
+        Bucket: BUCKET,
+        Key: key,
+        Body: body,
+        ContentType: contentType,
+      })
+    );
+  }
+
+  /** Read a text file from the recordings bucket. Returns null if not found. */
+  async readFile(key: string): Promise<string | null> {
+    try {
+      const res = await this.s3.send(
+        new GetObjectCommand({ Bucket: BUCKET, Key: key })
+      );
+      return (await res.Body?.transformToString()) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   /** Delete all objects under a prefix (streamId/) */
   async deleteVodFiles(streamId: string): Promise<number> {
     let deleted = 0;
