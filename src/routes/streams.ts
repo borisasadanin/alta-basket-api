@@ -457,8 +457,8 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
         request.log.warn(err, `Could not delete Restreamer process for ${id} (may already be stopped)`);
       });
 
-      // Stitch multi-part playlist if stream had recordings
-      if (meta && (meta.completedParts.length > 0 || meta.partNumber > 1)) {
+      // Stitch playlist (always needed — all recordings use p1.m3u8, not index.m3u8)
+      if (meta && meta.partNumber >= 1) {
         const parts = buildPartList(meta.completedParts, meta.partNumber);
         stitchPlaylist(minio, id, parts).catch((err) => {
           request.log.error(err, `Failed to stitch playlist for ${id}`);
@@ -571,7 +571,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
         entry.stoppedAt = entry.createdAt;
         // Try to stitch multi-part recording for orphaned stream
         const orphanMeta = streamMeta.get(entry.id);
-        if (orphanMeta && (orphanMeta.completedParts.length > 0 || orphanMeta.partNumber > 1)) {
+        if (orphanMeta && orphanMeta.partNumber >= 1) {
           const parts = buildPartList(orphanMeta.completedParts, orphanMeta.partNumber);
           stitchPlaylist(minio, entry.id, parts).catch((err) => {
             app.log.error(err, `Failed to stitch orphaned playlist for ${entry.id}`);

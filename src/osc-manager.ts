@@ -477,6 +477,37 @@ export class OscInstanceManager {
     // Wait for Restreamer to come back after reload (verify API is ready, not just web UI)
     await this.sleep(3000);
     await this.waitForHealth(url, true);
+
+    // Verify S3 filesystem is accessible (may take a moment after config reload)
+    if (this.s3Config) {
+      await this.verifyS3Ready(url);
+    }
+  }
+
+  private async verifyS3Ready(url: string): Promise<void> {
+    const deadline = Date.now() + 15_000; // 15s timeout
+    const sat = await this.ctx.getServiceAccessToken(SERVICE_ID);
+
+    while (Date.now() < deadline) {
+      try {
+        const res = await fetch(`${url}/api/v3/fs/disk`, {
+          headers: { Authorization: `Bearer ${sat}` },
+        });
+        if (res.ok) {
+          const disks = await res.json() as { name: string; type: string }[];
+          const hasS3 = disks.some((d: { name: string; type: string }) => d.name === "minio" || d.type === "s3");
+          if (hasS3) {
+            this.log.info("S3 filesystem verified as ready");
+            return;
+          }
+        }
+      } catch {
+        // Not ready yet
+      }
+      await this.sleep(1000);
+    }
+
+    this.log.error("S3 filesystem not verified within 15s — recordings may fail");
   }
 
   private async discoverRtmpHost(sat: string): Promise<string> {
