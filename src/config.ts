@@ -9,7 +9,7 @@
 const PORT = parseInt(process.env.PORT || "8000", 10);
 const API_KEY = process.env.API_KEY || "alta-basket-2026";
 const ADMIN_PIN = process.env.ADMIN_PIN || "804480";
-const VIEWER_PIN = process.env.VIEWER_PIN || "";
+const VIEWER_PIN = process.env.VIEWER_PIN || "123456";
 const OSC_PAT = process.env.OSC_ACCESS_TOKEN || "";
 const OSC_INSTANCE_NAME = process.env.OSC_INSTANCE_NAME || "restreamerlive";
 const RESTREAMER_URL =

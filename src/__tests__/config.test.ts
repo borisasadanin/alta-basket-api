@@ -48,17 +48,16 @@ describe("config validation", () => {
     expect(mod.config.MINIO_ACCESS_KEY).toBe("root");
   });
 
-  it("warns but does not exit when VIEWER_PIN is missing", async () => {
+  it("uses default VIEWER_PIN when env var is missing", async () => {
     delete process.env.VIEWER_PIN;
     const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
       throw new Error("process.exit called");
     }) as never);
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     const mod = await import("../config.js");
     mod.validateConfig();
     expect(exitSpy).not.toHaveBeenCalled();
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("VIEWER_PIN"));
+    expect(mod.config.VIEWER_PIN).toBe("123456");
   });
 
   it("passes validation when all env vars are set", async () => {
