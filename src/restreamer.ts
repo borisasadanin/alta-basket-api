@@ -102,7 +102,7 @@ export class RestreamerClient {
           "-f",
           "hls",
           "-hls_time",
-          "4",
+          "2",
           "-hls_list_size",
           "6",
           "-hls_flags",
@@ -139,7 +139,7 @@ export class RestreamerClient {
       autostart: true,
       reconnect: true,
       reconnect_delay_seconds: 5,
-      stale_timeout_seconds: 60,
+      stale_timeout_seconds: 120,
       input: [
         {
           id: "input",

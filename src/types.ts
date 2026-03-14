@@ -18,6 +18,8 @@ export interface StreamPublicInfo {
 export interface CreateStreamBody {
   name: string;
   deviceId?: string;
+  opponent?: string;
+  team?: string;
 }
 
 export interface RestreamerProcess {

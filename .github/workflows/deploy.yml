@@ -1,0 +1,22 @@
+name: Deploy
+on: workflow_dispatch
+jobs:
+  deploy-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci && npm run build
+      - name: Install OSC CLI
+        run: npm install -g @osaas/cli
+      - name: Deploy backend
+        env:
+          OSC_ACCESS_TOKEN: ${{ secrets.OSC_ACCESS_TOKEN }}
+        run: |
+          echo "yes" | osc remove eyevinn-web-runner altabasketapi || true
+          sleep 5
+          osc create eyevinn-web-runner altabasketapi \
+            -o SourceUrl="https://github.com/borisasadanin/alta-basket-api.git" \
+            -o OscAccessToken="${OSC_ACCESS_TOKEN}"

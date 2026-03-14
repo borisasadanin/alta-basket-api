@@ -17,6 +17,22 @@ export class MinioClient {
   private s3: S3Client;
   private endpoint: string;
 
+  /** Async mutex to prevent concurrent read-modify-write on vod-index.json */
+  private writeLock: Promise<void> = Promise.resolve();
+
+  private async withLock<T>(fn: () => Promise<T>): Promise<T> {
+    let release: () => void;
+    const acquired = new Promise<void>((r) => { release = r; });
+    const prev = this.writeLock;
+    this.writeLock = acquired;
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      release!();
+    }
+  }
+
   constructor(endpoint: string, accessKey: string, secretKey: string) {
     this.endpoint = endpoint.replace(/\/$/, "");
     this.s3 = new S3Client({
@@ -85,24 +101,39 @@ export class MinioClient {
     );
   }
 
-  /** Add a new VOD entry and persist. */
+  /** Add a new VOD entry and persist (mutex-protected). */
   async addVodEntry(entry: VodEntry): Promise<void> {
-    const entries = await this.readVodIndex();
-    entries.push(entry);
-    await this.writeVodIndex(entries);
+    return this.withLock(async () => {
+      const entries = await this.readVodIndex();
+      entries.push(entry);
+      await this.writeVodIndex(entries);
+    });
   }
 
-  /** Update an existing VOD entry (by id) and persist. */
+  /** Update an existing VOD entry (by id) and persist (mutex-protected). */
   async updateVodEntry(
     id: string,
     update: Partial<VodEntry>
   ): Promise<void> {
-    const entries = await this.readVodIndex();
-    const idx = entries.findIndex((e) => e.id === id);
-    if (idx !== -1) {
-      entries[idx] = { ...entries[idx], ...update };
-      await this.writeVodIndex(entries);
-    }
+    return this.withLock(async () => {
+      const entries = await this.readVodIndex();
+      const idx = entries.findIndex((e) => e.id === id);
+      if (idx !== -1) {
+        entries[idx] = { ...entries[idx], ...update };
+        await this.writeVodIndex(entries);
+      }
+    });
+  }
+
+  /** Remove a VOD entry by id and persist (mutex-protected). */
+  async removeVodEntry(id: string): Promise<boolean> {
+    return this.withLock(async () => {
+      const entries = await this.readVodIndex();
+      const filtered = entries.filter((e) => e.id !== id);
+      if (filtered.length === entries.length) return false;
+      await this.writeVodIndex(filtered);
+      return true;
+    });
   }
 
   /** Public URL for an HLS recording in the recordings bucket */
