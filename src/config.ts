@@ -1,11 +1,14 @@
 /**
  * Centralized configuration — all env vars, constants, and validation.
- * Exits the process if required variables are missing.
+ *
+ * NOTE: OSC Web Runner does not support custom env vars, so production
+ * defaults are used as fallbacks. When migrating to a platform with
+ * proper secrets management, remove the defaults and rely on env vars.
  */
 
 const PORT = parseInt(process.env.PORT || "8000", 10);
-const API_KEY = process.env.API_KEY || "";
-const ADMIN_PIN = process.env.ADMIN_PIN || "";
+const API_KEY = process.env.API_KEY || "alta-basket-2026";
+const ADMIN_PIN = process.env.ADMIN_PIN || "804480";
 const VIEWER_PIN = process.env.VIEWER_PIN || "";
 const OSC_PAT = process.env.OSC_ACCESS_TOKEN || "";
 const OSC_INSTANCE_NAME = process.env.OSC_INSTANCE_NAME || "restreamerlive";
@@ -18,9 +21,10 @@ const RESTREAMER_GRACE_PERIOD_MS = parseInt(
 );
 
 const MINIO_ENDPOINT =
-  process.env.MINIO_ENDPOINT || "";
-const MINIO_ACCESS_KEY = process.env.MINIO_ACCESS_KEY || "";
-const MINIO_SECRET_KEY = process.env.MINIO_SECRET_KEY || "";
+  process.env.MINIO_ENDPOINT ||
+  "https://borispriv-basket.minio-minio.auto.prod.osaas.io";
+const MINIO_ACCESS_KEY = process.env.MINIO_ACCESS_KEY || "root";
+const MINIO_SECRET_KEY = process.env.MINIO_SECRET_KEY || "37be8999e5d3d04615705921defbaea9";
 const MINIO_RECORDINGS_BUCKET = "recordings";
 
 const VIEWER_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -30,19 +34,21 @@ const STOPPED_TTL_MS = 10 * 60 * 1000; // 10 minutes
 // --- Validation (fatal on missing required vars) ---
 
 export function validateConfig(): void {
-  const required: [string, string][] = [
-    ["API_KEY", API_KEY],
-    ["ADMIN_PIN", ADMIN_PIN],
-    ["OSC_ACCESS_TOKEN", OSC_PAT],
-    ["MINIO_ENDPOINT", MINIO_ENDPOINT],
-    ["MINIO_ACCESS_KEY", MINIO_ACCESS_KEY],
-    ["MINIO_SECRET_KEY", MINIO_SECRET_KEY],
-  ];
-
-  const missing = required.filter(([, v]) => !v).map(([k]) => k);
-  if (missing.length > 0) {
-    console.error(`Missing required env vars: ${missing.join(", ")}`);
+  if (!OSC_PAT) {
+    console.error("Missing required env var: OSC_ACCESS_TOKEN");
     process.exit(1);
+  }
+
+  // Warn about vars using built-in defaults (OSC Web Runner limitation)
+  const defaults = [
+    ["API_KEY", API_KEY, "alta-basket-2026"],
+    ["ADMIN_PIN", ADMIN_PIN, "804480"],
+    ["MINIO_ACCESS_KEY", MINIO_ACCESS_KEY, "root"],
+  ] as const;
+  for (const [name, value, fallback] of defaults) {
+    if (value === fallback && !process.env[name]) {
+      console.warn(`${name} using built-in default — set env var for production`);
+    }
   }
 
   if (!VIEWER_PIN) {
