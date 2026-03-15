@@ -57,19 +57,28 @@ export async function stitchPlaylist(
       maxTargetDuration = Math.max(maxTargetDuration, parseInt(tdMatch[1]));
     }
 
-    // Extract segment entries (EXTINF + filename + optional program-date-time)
+    // Extract segment entries (EXTINF + optional tags + segment filename)
+    // Restreamer outputs: #EXTINF:... → #EXT-X-PROGRAM-DATE-TIME:... → filename.ts
+    // We must collect all HLS tags between #EXTINF and the segment URI
     const lines = content.split("\n");
     const block: string[] = [];
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i].trim();
       if (line.startsWith("#EXTINF:")) {
         block.push(line);
-        // Next line is the segment filename
-        if (i + 1 < lines.length) {
-          block.push(lines[i + 1].trim());
+        // Collect any tags between #EXTINF and the segment filename
+        i++;
+        while (i < lines.length) {
+          const next = lines[i].trim();
+          if (!next || next.startsWith("#EXTM3U") || next.startsWith("#EXT-X-ENDLIST") || next.startsWith("#EXT-X-TARGETDURATION")) {
+            break;
+          }
+          block.push(next);
+          if (!next.startsWith("#")) break; // Non-tag line = segment URI → done
           i++;
         }
       } else if (line.startsWith("#EXT-X-PROGRAM-DATE-TIME:")) {
+        // Program date time that appears before #EXTINF (less common but valid)
         block.push(line);
       }
     }
