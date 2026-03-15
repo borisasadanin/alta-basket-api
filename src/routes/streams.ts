@@ -294,7 +294,9 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
           const status = determineStreamStatus(hlsLive, meta);
 
           // If stream ended, auto-mark as stopped in metadata
-          if (status === "stopped" && meta && !meta.stoppedAt) {
+          // Guard: don't auto-stop streams younger than 30s (RTMP may still be connecting)
+          const ageMs = meta ? Date.now() - new Date(meta.createdAt).getTime() : Infinity;
+          if (status === "stopped" && meta && !meta.stoppedAt && ageMs > 30_000) {
             meta.stoppedAt = new Date().toISOString();
             const dur = Math.round((new Date(meta.stoppedAt).getTime() - new Date(meta.createdAt).getTime()) / 1000);
             minio.updateVodEntry(streamId, { stoppedAt: meta.stoppedAt, durationSeconds: dur }).catch(() => {});
@@ -305,7 +307,8 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
             name: meta?.name || streamId,
             hlsUrl: restreamer.hlsUrl(streamId),
             createdAt: meta?.createdAt || "",
-            status,
+            // Young streams that would be "stopped" should show as "waiting" instead
+            status: status === "stopped" && meta && !meta.stoppedAt ? "waiting" : status,
             viewers: getViewerCount(streamId),
           };
         })
@@ -335,6 +338,22 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
           hlsUrl: restreamer.hlsUrl(streamId),
           createdAt: meta.createdAt,
           status: "paused",
+          viewers: getViewerCount(streamId),
+        });
+      }
+
+      // Waiting streams (metadata exists, no Restreamer process yet, not stopped/paused)
+      // This catches newly created streams where the process hasn't appeared in
+      // listAltaProcesses() yet (race condition / API lag).
+      for (const [streamId, meta] of streamMeta) {
+        if (activeIds.has(streamId) || meta.stoppedAt || meta.pausedAt) continue;
+        // Stream has metadata but no process — show as "waiting"
+        streams.push({
+          id: streamId,
+          name: meta.name,
+          hlsUrl: restreamer.hlsUrl(streamId),
+          createdAt: meta.createdAt,
+          status: "waiting",
           viewers: getViewerCount(streamId),
         });
       }
@@ -387,6 +406,19 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
 
         const process = await restreamer.getProcess(id);
         if (!process) {
+          // Process not found in Restreamer — but if metadata exists (not stopped, not paused),
+          // the stream was recently created and the process hasn't registered yet.
+          // Return "waiting" instead of 404 to prevent the frontend from closing the player.
+          if (meta && !meta.stoppedAt && !meta.pausedAt) {
+            return reply.send({
+              id,
+              name: meta.name,
+              hlsUrl: restreamer.hlsUrl(id),
+              createdAt: meta.createdAt,
+              status: "waiting",
+              viewers: getViewerCount(id),
+            } satisfies StreamPublicInfo);
+          }
           return reply.code(404).send({ error: "Stream not found" });
         }
 
@@ -399,8 +431,9 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
 
         const status = determineStreamStatus(hlsLive, meta);
 
-        // Auto-mark as stopped
-        if (status === "stopped" && meta && !meta.stoppedAt) {
+        // Auto-mark as stopped (only for streams older than 30s to avoid killing brand-new streams)
+        const streamAgeMs = meta ? Date.now() - new Date(meta.createdAt).getTime() : Infinity;
+        if (status === "stopped" && meta && !meta.stoppedAt && streamAgeMs > 30_000) {
           meta.stoppedAt = new Date().toISOString();
           const dur = Math.round((new Date(meta.stoppedAt).getTime() - new Date(meta.createdAt).getTime()) / 1000);
           minio.updateVodEntry(id, { stoppedAt: meta.stoppedAt, durationSeconds: dur }).catch(() => {});
@@ -411,7 +444,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
           name: meta?.name || id,
           hlsUrl: restreamer.hlsUrl(id),
           createdAt: meta?.createdAt || "",
-          status,
+          status: status === "stopped" && meta && !meta.stoppedAt ? "waiting" : status,
           viewers: getViewerCount(id),
         };
 
