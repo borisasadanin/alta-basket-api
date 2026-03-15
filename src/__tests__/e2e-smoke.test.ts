@@ -341,7 +341,7 @@ describe("E2E Smoke Tests: Recording → VOD flow", () => {
       // Verify Restreamer process was created with partNumber: 2
       expect(mockRestreamer.createProcess).toHaveBeenLastCalledWith(
         streamId,
-        { recording: true, partNumber: 2 }
+        { recording: false, partNumber: 2 }
       );
 
       // --- Stop ---

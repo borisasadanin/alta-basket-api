@@ -84,7 +84,8 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
     const streamId = crypto.randomUUID().slice(0, 8);
 
     try {
-      await restreamer.createProcess(streamId, { recording: true, partNumber: 1 });
+      // Recording temporarily disabled to prevent Restreamer OOM crash (dual FFmpeg output)
+      await restreamer.createProcess(streamId, { recording: false, partNumber: 1 });
 
       oscManager.streamStarted();
 
@@ -200,7 +201,8 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
     meta.wasLive = false;
 
     try {
-      await restreamer.createProcess(id, { recording: true, partNumber: meta.partNumber });
+      // Recording temporarily disabled to prevent Restreamer OOM crash (dual FFmpeg output)
+      await restreamer.createProcess(id, { recording: false, partNumber: meta.partNumber });
       oscManager.streamResumed();
 
       return reply.code(200).send({
