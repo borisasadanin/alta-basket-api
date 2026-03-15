@@ -194,6 +194,10 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
     // Increment part number for new recording segment
     meta.partNumber++;
     meta.pausedAt = undefined;
+    // Reset wasLive so status becomes "waiting" (not "stopped") during the
+    // gap before HLS is live again.  It gets re-set to true once isHlsLive()
+    // returns true in the streams list/detail routes.
+    meta.wasLive = false;
 
     try {
       await restreamer.createProcess(id, { recording: true, partNumber: meta.partNumber });
