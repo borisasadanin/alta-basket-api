@@ -11,7 +11,7 @@ interface SegmentInfo {
   duration: number;
 }
 
-/** Parse #EXTINF + segment filename pairs from an HLS manifest. */
+/** Parse #EXTINF + segment filename pairs from an HLS media playlist. */
 export function parseSegments(manifest: string): SegmentInfo[] {
   const lines = manifest.split("\n");
   const segments: SegmentInfo[] = [];
@@ -19,18 +19,42 @@ export function parseSegments(manifest: string): SegmentInfo[] {
     const line = lines[i].trim();
     if (line.startsWith("#EXTINF:")) {
       const duration = parseFloat(line.slice(8)) || 2.0;
-      // Next non-empty, non-comment line is the segment filename
+      // Next non-empty, non-comment line is the segment URI
       for (let j = i + 1; j < lines.length; j++) {
         const next = lines[j].trim();
         if (next && !next.startsWith("#")) {
-          segments.push({ filename: next, duration });
-          i = j; // advance outer loop past the filename
+          // Strip query params (e.g. ?session=xxx) — keep only the filename
+          const filename = next.split("?")[0];
+          segments.push({ filename, duration });
+          i = j;
           break;
         }
       }
     }
   }
   return segments;
+}
+
+/**
+ * Restreamer serves a master playlist that redirects to a media playlist
+ * via #EXT-X-STREAM-INF. Detect this and return the media playlist URL.
+ * Returns null if the manifest is already a media playlist.
+ */
+export function extractMediaPlaylistUrl(manifest: string, baseUrl: string): string | null {
+  const lines = manifest.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].trim().startsWith("#EXT-X-STREAM-INF")) {
+      // Next non-empty line is the variant URI
+      for (let j = i + 1; j < lines.length; j++) {
+        const uri = lines[j].trim();
+        if (uri && !uri.startsWith("#")) {
+          // URI may be relative (e.g. "dc21e849.m3u8?session=xxx")
+          return `${baseUrl}/${uri}`;
+        }
+      }
+    }
+  }
+  return null;
 }
 
 export class SegmentCollector {
@@ -46,6 +70,8 @@ export class SegmentCollector {
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private running = false;
   private readonly pollIntervalMs = 2000;
+  /** Resolved media playlist URL (discovered from master playlist on first poll) */
+  private mediaPlaylistUrl: string | null = null;
 
   constructor(
     streamId: string,
@@ -96,24 +122,30 @@ export class SegmentCollector {
   }
 
   async pollOnce(): Promise<void> {
+    // Step 1: Resolve media playlist URL (handles master → media redirect)
+    const playlistUrl = await this.resolveMediaPlaylistUrl();
+    if (!playlistUrl) return;
+
+    // Step 2: Fetch the media playlist
     let manifestText: string;
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 3000);
-      const res = await fetch(this.manifestUrl, { signal: controller.signal });
+      const res = await fetch(playlistUrl, { signal: controller.signal });
       clearTimeout(timeout);
       if (!res.ok) {
         if (res.status !== 404) {
-          this.logger.warn(`Manifest fetch ${res.status} for ${this.streamId}`);
+          this.logger.warn(`Media playlist fetch ${res.status} for ${this.streamId}`);
         }
         return;
       }
       manifestText = await res.text();
     } catch (err) {
-      this.logger.warn(err, `Manifest fetch failed for ${this.streamId}`);
+      this.logger.warn(err, `Media playlist fetch failed for ${this.streamId}`);
       return;
     }
 
+    // Step 3: Parse and download new segments
     const segments = parseSegments(manifestText);
     const newSegments = segments.filter((s) => !this.savedSegments.has(s.filename));
 
@@ -139,6 +171,43 @@ export class SegmentCollector {
       } catch (err) {
         this.logger.warn(err, `Failed to save segment ${seg.filename}`);
       }
+    }
+  }
+
+  /**
+   * Resolve the actual media playlist URL. On first call, fetches the master
+   * playlist to discover the variant URL with session token. Caches the result.
+   */
+  private async resolveMediaPlaylistUrl(): Promise<string | null> {
+    if (this.mediaPlaylistUrl) return this.mediaPlaylistUrl;
+
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3000);
+      const res = await fetch(this.manifestUrl, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (!res.ok) {
+        if (res.status !== 404) {
+          this.logger.warn(`Manifest fetch ${res.status} for ${this.streamId}`);
+        }
+        return null;
+      }
+      const text = await res.text();
+
+      // Check if this is a master playlist (contains #EXT-X-STREAM-INF)
+      const mediaUrl = extractMediaPlaylistUrl(text, this.segmentBaseUrl.replace(/\/$/, ""));
+      if (mediaUrl) {
+        this.mediaPlaylistUrl = mediaUrl;
+        this.logger.info(`Resolved media playlist: ${mediaUrl}`);
+        return mediaUrl;
+      }
+
+      // It's already a media playlist — use the original URL
+      this.mediaPlaylistUrl = this.manifestUrl;
+      return this.manifestUrl;
+    } catch (err) {
+      this.logger.warn(err, `Manifest resolve failed for ${this.streamId}`);
+      return null;
     }
   }
 

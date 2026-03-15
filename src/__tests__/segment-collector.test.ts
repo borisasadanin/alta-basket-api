@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { parseSegments, SegmentCollector } from "../segment-collector.js";
+import { parseSegments, extractMediaPlaylistUrl, SegmentCollector } from "../segment-collector.js";
 
 // --- Mock helpers ---
 
@@ -27,6 +27,22 @@ abc1234543.ts
 abc1234544.ts
 `;
 
+const MASTER_PLAYLIST = `#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-STREAM-INF:BANDWIDTH=1024
+stream1.m3u8?session=abc123
+`;
+
+const SESSION_MANIFEST = `#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:10
+#EXTINF:1.967000,
+stream110.ts?session=abc123
+#EXTINF:1.967000,
+stream111.ts?session=abc123
+`;
+
 // --- parseSegments tests ---
 
 describe("parseSegments", () => {
@@ -36,6 +52,14 @@ describe("parseSegments", () => {
       { filename: "abc1234542.ts", duration: 2.0 },
       { filename: "abc1234543.ts", duration: 1.998 },
       { filename: "abc1234544.ts", duration: 2.002 },
+    ]);
+  });
+
+  it("strips query params from segment filenames", () => {
+    const segments = parseSegments(SESSION_MANIFEST);
+    expect(segments).toEqual([
+      { filename: "stream110.ts", duration: 1.967 },
+      { filename: "stream111.ts", duration: 1.967 },
     ]);
   });
 
@@ -59,6 +83,20 @@ seg001.ts
     const manifest = `#EXTINF:bad,\nseg.ts\n`;
     const segments = parseSegments(manifest);
     expect(segments).toEqual([{ filename: "seg.ts", duration: 2.0 }]);
+  });
+});
+
+// --- extractMediaPlaylistUrl tests ---
+
+describe("extractMediaPlaylistUrl", () => {
+  it("extracts variant URL from master playlist", () => {
+    const url = extractMediaPlaylistUrl(MASTER_PLAYLIST, "https://restreamer.example.com/memfs");
+    expect(url).toBe("https://restreamer.example.com/memfs/stream1.m3u8?session=abc123");
+  });
+
+  it("returns null for a media playlist (no #EXT-X-STREAM-INF)", () => {
+    const url = extractMediaPlaylistUrl(SAMPLE_MANIFEST, "https://restreamer.example.com/memfs");
+    expect(url).toBeNull();
   });
 });
 
@@ -98,10 +136,39 @@ describe("SegmentCollector", () => {
     return new Response(new ArrayBuffer(size), { status: 200 });
   }
 
-  it("polls manifest and saves new segments", async () => {
+  it("resolves master → media playlist and saves segments", async () => {
     const { collector, minio } = createCollector();
 
+    // First fetch: master playlist → resolve media URL
+    // Second fetch: media playlist with segments
+    // Third+: segment downloads
     fetchSpy
+      .mockResolvedValueOnce(manifestResponse(MASTER_PLAYLIST))
+      .mockResolvedValueOnce(manifestResponse(SESSION_MANIFEST))
+      .mockResolvedValueOnce(segmentResponse(1000))
+      .mockResolvedValueOnce(segmentResponse(1000));
+
+    await collector.pollOnce();
+
+    expect(minio.uploadBuffer).toHaveBeenCalledTimes(2);
+    expect(minio.uploadBuffer).toHaveBeenCalledWith(
+      "stream1/p1_stream110.ts",
+      expect.any(Buffer),
+      "video/mp2t",
+    );
+    expect(minio.uploadBuffer).toHaveBeenCalledWith(
+      "stream1/p1_stream111.ts",
+      expect.any(Buffer),
+      "video/mp2t",
+    );
+  });
+
+  it("polls direct media playlist (no master redirect)", async () => {
+    const { collector, minio } = createCollector();
+
+    // First fetch returns media playlist directly (no #EXT-X-STREAM-INF)
+    fetchSpy
+      .mockResolvedValueOnce(manifestResponse(SAMPLE_MANIFEST))
       .mockResolvedValueOnce(manifestResponse(SAMPLE_MANIFEST))
       .mockResolvedValueOnce(segmentResponse(1000))
       .mockResolvedValueOnce(segmentResponse(1000))
@@ -109,7 +176,6 @@ describe("SegmentCollector", () => {
 
     await collector.pollOnce();
 
-    expect(fetchSpy).toHaveBeenCalledTimes(4); // 1 manifest + 3 segments
     expect(minio.uploadBuffer).toHaveBeenCalledTimes(3);
     expect(minio.uploadBuffer).toHaveBeenCalledWith(
       "stream1/p1_abc1234542.ts",
@@ -118,12 +184,38 @@ describe("SegmentCollector", () => {
     );
   });
 
+  it("caches media playlist URL after first resolve", async () => {
+    const { collector, minio } = createCollector();
+
+    // First poll: master → media → segments
+    fetchSpy
+      .mockResolvedValueOnce(manifestResponse(MASTER_PLAYLIST))
+      .mockResolvedValueOnce(manifestResponse(SESSION_MANIFEST))
+      .mockResolvedValueOnce(segmentResponse(500))
+      .mockResolvedValueOnce(segmentResponse(500));
+
+    await collector.pollOnce();
+    expect(minio.uploadBuffer).toHaveBeenCalledTimes(2);
+
+    // Second poll: should NOT fetch master again — goes straight to media playlist
+    const manifest2 = `#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:1.967000,\nstream112.ts?session=abc123\n`;
+    fetchSpy
+      .mockResolvedValueOnce(manifestResponse(manifest2))
+      .mockResolvedValueOnce(segmentResponse(500));
+
+    await collector.pollOnce();
+    // 1 master + 1 media + 2 segments from first poll, + 1 media + 1 segment from second = 6
+    expect(fetchSpy).toHaveBeenCalledTimes(6);
+    expect(minio.uploadBuffer).toHaveBeenCalledTimes(3);
+  });
+
   it("skips already-saved segments on subsequent polls", async () => {
     const { collector, minio } = createCollector();
 
-    // First poll: 2 segments
     const manifest2 = `#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.000000,\nseg01.ts\n#EXTINF:2.000000,\nseg02.ts\n`;
+    // First resolve (media playlist) + first poll
     fetchSpy
+      .mockResolvedValueOnce(manifestResponse(manifest2))
       .mockResolvedValueOnce(manifestResponse(manifest2))
       .mockResolvedValueOnce(segmentResponse(500))
       .mockResolvedValueOnce(segmentResponse(500));
@@ -150,7 +242,9 @@ describe("SegmentCollector", () => {
     const { collector, minio } = createCollector();
 
     const manifest = `#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.000000,\nseg01.ts\n#EXTINF:1.998000,\nseg02.ts\n`;
+    // Resolve + poll
     fetchSpy
+      .mockResolvedValueOnce(manifestResponse(manifest))
       .mockResolvedValueOnce(manifestResponse(manifest))
       .mockResolvedValueOnce(segmentResponse(500))
       .mockResolvedValueOnce(segmentResponse(500));
@@ -163,7 +257,6 @@ describe("SegmentCollector", () => {
     const key = await collector.stop();
     expect(key).toBe("stream1/p1.m3u8");
 
-    // Find the manifest upload call
     const m3u8Call = minio.uploadBuffer.mock.calls.find(
       (c: any[]) => (c[0] as string).endsWith(".m3u8"),
     );
@@ -183,13 +276,12 @@ describe("SegmentCollector", () => {
   it("stop() returns null when no segments were collected", async () => {
     const { collector, minio } = createCollector();
 
-    // Final poll returns 404
+    // Resolve fails with 404
     fetchSpy.mockResolvedValueOnce(new Response(null, { status: 404 }));
 
     const key = await collector.stop();
     expect(key).toBeNull();
 
-    // No manifest uploaded
     const m3u8Calls = minio.uploadBuffer.mock.calls.filter(
       (c: any[]) => (c[0] as string).endsWith(".m3u8"),
     );
@@ -201,14 +293,15 @@ describe("SegmentCollector", () => {
 
     const manifest = `#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.000000,\nseg01.ts\n#EXTINF:2.000000,\nseg02.ts\n`;
 
+    // Resolve + poll with seg01 download failing
     fetchSpy
+      .mockResolvedValueOnce(manifestResponse(manifest))
       .mockResolvedValueOnce(manifestResponse(manifest))
       .mockResolvedValueOnce(new Response(null, { status: 500 }))  // seg01 fails
       .mockResolvedValueOnce(segmentResponse(500));                // seg02 succeeds
 
     await collector.pollOnce();
 
-    // Only seg02 saved
     expect(minio.uploadBuffer).toHaveBeenCalledTimes(1);
     expect(minio.uploadBuffer).toHaveBeenCalledWith(
       "stream1/p1_seg02.ts",
@@ -232,6 +325,7 @@ describe("SegmentCollector", () => {
 
     const manifest = `#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.000000,\nseg10.ts\n`;
     fetchSpy
+      .mockResolvedValueOnce(manifestResponse(manifest))
       .mockResolvedValueOnce(manifestResponse(manifest))
       .mockResolvedValueOnce(segmentResponse(300));
 
@@ -265,6 +359,7 @@ describe("SegmentCollector", () => {
     const manifest = `#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.000000,\nseg01.ts\n#EXTINF:2.000000,\nseg02.ts\n`;
     fetchSpy
       .mockResolvedValueOnce(manifestResponse(manifest))
+      .mockResolvedValueOnce(manifestResponse(manifest))
       .mockResolvedValueOnce(segmentResponse(500))
       .mockResolvedValueOnce(segmentResponse(500));
 
@@ -274,7 +369,6 @@ describe("SegmentCollector", () => {
 
     await collector.pollOnce();
 
-    // Both segments attempted, only seg02 actually saved
     expect(minio.uploadBuffer).toHaveBeenCalledTimes(2);
   });
 });
