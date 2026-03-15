@@ -293,22 +293,17 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
 
           const status = determineStreamStatus(hlsLive, meta);
 
-          // If stream ended, auto-mark as stopped in metadata
-          // Guard: don't auto-stop streams younger than 30s (RTMP may still be connecting)
-          const ageMs = meta ? Date.now() - new Date(meta.createdAt).getTime() : Infinity;
-          if (status === "stopped" && meta && !meta.stoppedAt && ageMs > 30_000) {
-            meta.stoppedAt = new Date().toISOString();
-            const dur = Math.round((new Date(meta.stoppedAt).getTime() - new Date(meta.createdAt).getTime()) / 1000);
-            minio.updateVodEntry(streamId, { stoppedAt: meta.stoppedAt, durationSeconds: dur }).catch(() => {});
-          }
+          // NOTE: We intentionally do NOT auto-stop streams here.
+          // A single failed isHlsLive() check (network hiccup) would permanently
+          // kill a live stream. The cleanup timer (every 60s) handles stopping
+          // by checking the actual Restreamer process state instead.
 
           return {
             id: streamId,
             name: meta?.name || streamId,
             hlsUrl: restreamer.hlsUrl(streamId),
             createdAt: meta?.createdAt || "",
-            // Young streams that would be "stopped" should show as "waiting" instead
-            status: status === "stopped" && meta && !meta.stoppedAt ? "waiting" : status,
+            status,
             viewers: getViewerCount(streamId),
           };
         })
@@ -431,20 +426,15 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
 
         const status = determineStreamStatus(hlsLive, meta);
 
-        // Auto-mark as stopped (only for streams older than 30s to avoid killing brand-new streams)
-        const streamAgeMs = meta ? Date.now() - new Date(meta.createdAt).getTime() : Infinity;
-        if (status === "stopped" && meta && !meta.stoppedAt && streamAgeMs > 30_000) {
-          meta.stoppedAt = new Date().toISOString();
-          const dur = Math.round((new Date(meta.stoppedAt).getTime() - new Date(meta.createdAt).getTime()) / 1000);
-          minio.updateVodEntry(id, { stoppedAt: meta.stoppedAt, durationSeconds: dur }).catch(() => {});
-        }
+        // NOTE: No auto-stop here. The cleanup timer handles marking streams
+        // as stopped based on the actual Restreamer process state.
 
         const info: StreamPublicInfo = {
           id,
           name: meta?.name || id,
           hlsUrl: restreamer.hlsUrl(id),
           createdAt: meta?.createdAt || "",
-          status: status === "stopped" && meta && !meta.stoppedAt ? "waiting" : status,
+          status,
           viewers: getViewerCount(id),
         };
 

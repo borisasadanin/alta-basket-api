@@ -195,7 +195,13 @@ export class RestreamerClient {
 
   async isHlsLive(streamId: string): Promise<boolean> {
     try {
-      const res = await fetch(`${this.baseUrl}/memfs/${streamId}.m3u8`, { method: "HEAD" });
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      const res = await fetch(`${this.baseUrl}/memfs/${streamId}.m3u8`, {
+        method: "HEAD",
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
       return res.ok;
     } catch {
       return false;
