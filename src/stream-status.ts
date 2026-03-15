@@ -6,8 +6,13 @@ export function determineStreamStatus(
   hlsLive: boolean,
   meta?: { wasLive?: boolean; stoppedAt?: string; pausedAt?: string }
 ): "live" | "waiting" | "stopped" | "paused" {
+  // Explicit stop (set by DELETE route or cleanup timer) — always trust
+  if (meta?.stoppedAt) return "stopped";
   if (meta?.pausedAt) return "paused";
   if (hlsLive) return "live";
-  if (meta?.wasLive) return "stopped";
+  // Stream was recently live but HLS check failed (transient network hiccup).
+  // Return "live" (optimistic) — only the cleanup timer should mark as "stopped"
+  // after confirming the Restreamer process is truly dead for 3+ minutes.
+  if (meta?.wasLive) return "live";
   return "waiting";
 }
