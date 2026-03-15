@@ -25,6 +25,7 @@ export interface CreateStreamBody {
 export interface RestreamerProcess {
   id: string;
   reference: string;
+  created_at?: number; // Unix timestamp (seconds) from Restreamer
   config: {
     id: string;
     input: { id: string; address: string; options: string[] }[];

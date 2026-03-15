@@ -284,19 +284,30 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
           if (meta?.stoppedAt) {
             meta.stoppedAt = undefined;
           }
-          const hlsLive = await restreamer.isHlsLive(streamId);
+
+          // Check BOTH Restreamer process state AND HLS manifest.
+          // A process in "failed" state is not producing HLS, regardless of wasLive.
+          const processExec = p.state?.exec;
+          const processIsHealthy = processExec === "running";
+          const hlsLive = processIsHealthy ? await restreamer.isHlsLive(streamId) : false;
 
           // Track whether stream was ever live
           if (hlsLive && meta) {
             meta.wasLive = true;
           }
 
-          const status = determineStreamStatus(hlsLive, meta);
+          // If process is in a failed/finished state (no RTMP input), override
+          // wasLive to prevent the optimistic "live" status for dead streams.
+          // Only "running" processes can be truly live.
+          const effectiveMeta = (!processIsHealthy && meta?.wasLive)
+            ? { ...meta, wasLive: false }
+            : meta;
+
+          const status = determineStreamStatus(hlsLive, effectiveMeta);
 
           // NOTE: We intentionally do NOT auto-stop streams here.
-          // A single failed isHlsLive() check (network hiccup) would permanently
-          // kill a live stream. The cleanup timer (every 60s) handles stopping
-          // by checking the actual Restreamer process state instead.
+          // The cleanup timer (every 60s) handles stopping by checking the
+          // actual Restreamer process state instead.
 
           return {
             id: streamId,
@@ -419,14 +430,23 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
           return reply.code(404).send({ error: "Stream not found" });
         }
 
-        const hlsLive = await restreamer.isHlsLive(id);
+        // Check BOTH process state AND HLS manifest
+        const processExec = process.state?.exec;
+        const processIsHealthy = processExec === "running";
+        const hlsLive = processIsHealthy ? await restreamer.isHlsLive(id) : false;
 
         // Track wasLive for accurate status
         if (hlsLive && meta) {
           meta.wasLive = true;
         }
 
-        const status = determineStreamStatus(hlsLive, meta);
+        // If process is failed (no RTMP input), override wasLive to prevent
+        // the optimistic "live" status for dead streams.
+        const effectiveMeta = (!processIsHealthy && meta?.wasLive)
+          ? { ...meta, wasLive: false }
+          : meta;
+
+        const status = determineStreamStatus(hlsLive, effectiveMeta);
 
         // NOTE: No auto-stop here. The cleanup timer handles marking streams
         // as stopped based on the actual Restreamer process state.
@@ -548,7 +568,13 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
         const state = p.state?.exec;
         const streamId = p.config.id.replace("alta-", "");
         const meta = streamMeta.get(streamId);
-        const ageMs = meta ? Date.now() - new Date(meta.createdAt).getTime() : 0;
+        // Use backend metadata age, falling back to Restreamer process created_at.
+        // Without this fallback, orphaned processes (metadata lost after backend
+        // redeploy) would never be cleaned up since ageMs would be 0.
+        const createdAtMs = meta
+          ? new Date(meta.createdAt).getTime()
+          : (p.created_at ? p.created_at * 1000 : Date.now());
+        const ageMs = Date.now() - createdAtMs;
 
         // Skip paused streams — they intentionally have no active Restreamer process
         if (meta?.pausedAt && !meta.stoppedAt) continue;
