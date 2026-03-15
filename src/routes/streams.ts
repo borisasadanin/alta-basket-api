@@ -5,7 +5,8 @@
 import type { FastifyInstance } from "fastify";
 import { config } from "../config.js";
 import { requireApiKey, requireViewerAuth } from "../auth.js";
-import { streamMeta, restreamer, minio, oscManager } from "../state.js";
+import { streamMeta, restreamer, minio, oscManager, collectors } from "../state.js";
+import { SegmentCollector } from "../segment-collector.js";
 import { getViewerCount, registerViewer, viewers } from "../viewer-tracking.js";
 import { determineStreamStatus } from "../stream-status.js";
 import { uploadPauseSegments } from "../pause-segments.js";
@@ -84,10 +85,15 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
     const streamId = crypto.randomUUID().slice(0, 8);
 
     try {
-      // Recording temporarily disabled to prevent Restreamer OOM crash (dual FFmpeg output)
+      // Restreamer recording disabled — SegmentCollector handles recording via HTTP polling
       await restreamer.createProcess(streamId, { recording: false, partNumber: 1 });
 
       oscManager.streamStarted();
+
+      // Start collecting HLS segments for VOD recording
+      const collector = new SegmentCollector(streamId, config.RESTREAMER_URL, minio, request.log, 1);
+      collector.start();
+      collectors.set(streamId, collector);
 
       const info: StreamInfo = {
         id: streamId,
@@ -143,6 +149,13 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
     }
     if (meta.pausedAt) {
       return reply.code(409).send({ error: "already_paused", message: "Strömmen är redan pausad" });
+    }
+
+    // Stop collecting segments and build part manifest BEFORE killing Restreamer
+    const pauseCollector = collectors.get(id);
+    if (pauseCollector) {
+      await pauseCollector.pause();
+      collectors.delete(id);
     }
 
     meta.pausedAt = new Date().toISOString();
@@ -201,9 +214,14 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
     meta.wasLive = false;
 
     try {
-      // Recording temporarily disabled to prevent Restreamer OOM crash (dual FFmpeg output)
+      // Restreamer recording disabled — SegmentCollector handles recording via HTTP polling
       await restreamer.createProcess(id, { recording: false, partNumber: meta.partNumber });
       oscManager.streamResumed();
+
+      // Start collecting segments for the new part
+      const resumeCollector = new SegmentCollector(id, config.RESTREAMER_URL, minio, request.log, meta.partNumber);
+      resumeCollector.start();
+      collectors.set(id, resumeCollector);
 
       return reply.code(200).send({
         status: "resumed",
@@ -516,6 +534,13 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
         oscManager.pausedStreamEnded();
       } else {
         oscManager.streamEnded();
+      }
+
+      // Stop collecting segments and build final part manifest
+      const stopCollector = collectors.get(id);
+      if (stopCollector) {
+        await stopCollector.stop();
+        collectors.delete(id);
       }
 
       // Delete the Restreamer process in the background (fire-and-forget).

@@ -4,6 +4,7 @@
 import { RestreamerClient } from "./restreamer.js";
 import { OscInstanceManager } from "./osc-manager.js";
 import { MinioClient } from "./minio.js";
+import type { SegmentCollector } from "./segment-collector.js";
 
 export interface StreamMeta {
   name: string;
@@ -21,6 +22,9 @@ export interface StreamMeta {
 
 /** In-memory stream metadata */
 export const streamMeta = new Map<string, StreamMeta>();
+
+/** Active segment collectors — one per recording stream */
+export const collectors = new Map<string, SegmentCollector>();
 
 /**
  * Service singletons — set once at startup by index.ts.
