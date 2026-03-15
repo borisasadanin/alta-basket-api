@@ -368,37 +368,39 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
       if (!requireViewerAuth(request, reply)) return;
 
       const { id } = request.params;
-      try {
-        const meta = streamMeta.get(id);
+      const meta = streamMeta.get(id);
 
-        // Check if stopped (within TTL)
-        if (meta?.stoppedAt) {
-          const age = Date.now() - new Date(meta.stoppedAt).getTime();
-          if (age <= config.STOPPED_TTL_MS) {
-            return reply.send({
-              id,
-              name: meta.name,
-              hlsUrl: restreamer.hlsUrl(id),
-              createdAt: meta.createdAt,
-              status: "stopped",
-              viewers: 0,
-            } satisfies StreamPublicInfo);
-          }
-          return reply.code(404).send({ error: "Stream not found" });
-        }
-
-        // Check if paused
-        if (meta?.pausedAt && !meta.stoppedAt) {
+      // Check if stopped (within TTL)
+      if (meta?.stoppedAt) {
+        const age = Date.now() - new Date(meta.stoppedAt).getTime();
+        if (age <= config.STOPPED_TTL_MS) {
           return reply.send({
             id,
             name: meta.name,
             hlsUrl: restreamer.hlsUrl(id),
             createdAt: meta.createdAt,
-            status: "paused",
-            viewers: getViewerCount(id),
+            status: "stopped",
+            viewers: 0,
           } satisfies StreamPublicInfo);
         }
+        return reply.code(404).send({ error: "Stream not found" });
+      }
 
+      // Check if paused
+      if (meta?.pausedAt && !meta.stoppedAt) {
+        return reply.send({
+          id,
+          name: meta.name,
+          hlsUrl: restreamer.hlsUrl(id),
+          createdAt: meta.createdAt,
+          status: "paused",
+          viewers: getViewerCount(id),
+        } satisfies StreamPublicInfo);
+      }
+
+      // Try Restreamer — but fall back to metadata if Restreamer is unavailable.
+      // A Restreamer API failure must NEVER cause a 500 that kills the frontend player.
+      try {
         const process = await restreamer.getProcess(id);
         if (!process) {
           // Process not found in Restreamer — but if metadata exists (not stopped, not paused),
@@ -440,8 +442,25 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
 
         return reply.send(info);
       } catch (err) {
-        request.log.error(err, "Failed to get stream");
-        return reply.code(500).send({ error: "Failed to get stream" });
+        // Restreamer API failed — fall back to metadata to keep the player alive.
+        // The stream is probably still running; we just can't confirm HLS status right now.
+        request.log.warn(err, `Restreamer API error for stream ${id}, falling back to metadata`);
+
+        if (meta && !meta.stoppedAt && !meta.pausedAt) {
+          // Use last known status: if wasLive, report "live" (optimistic)
+          const fallbackStatus = determineStreamStatus(false, meta);
+          return reply.send({
+            id,
+            name: meta.name,
+            hlsUrl: restreamer.hlsUrl(id),
+            createdAt: meta.createdAt,
+            status: fallbackStatus,
+            viewers: getViewerCount(id),
+          } satisfies StreamPublicInfo);
+        }
+
+        // No metadata — truly unknown stream
+        return reply.code(404).send({ error: "Stream not found" });
       }
     }
   );
