@@ -534,9 +534,13 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
         // Skip paused streams — they intentionally have no active Restreamer process
         if (meta?.pausedAt && !meta.stoppedAt) continue;
 
-        // Delete finished/failed processes (RTMP timed out or errored)
-        if (state === "finished" || state === "failed") {
-          app.log.info(`Cleaning up stale stream ${streamId} (state: ${state})`);
+        // Delete finished/failed processes — but ONLY if older than 3 minutes.
+        // Young processes in "finished" state may be in a reconnect cycle
+        // (autostart + reconnect) waiting for RTMP input from the iOS app.
+        // The stale_timeout_seconds (120s) on Restreamer handles truly dead
+        // processes, so we only clean up after that window has fully passed.
+        if ((state === "finished" || state === "failed") && ageMs > 3 * 60 * 1000) {
+          app.log.info(`Cleaning up stale stream ${streamId} (state: ${state}, age: ${Math.round(ageMs / 1000)}s)`);
           await restreamer.deleteProcess(streamId);
           if (meta && !meta.stoppedAt) {
             meta.stoppedAt = new Date().toISOString();
@@ -545,7 +549,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
           }
           viewers.delete(streamId);
         }
-        // Delete processes stuck in "waiting" for > 10 minutes (never got RTMP input)
+        // Delete processes stuck in non-running state for > 10 minutes
         else if (state !== "running" && ageMs > 10 * 60 * 1000) {
           app.log.info(`Cleaning up abandoned stream ${streamId} (age: ${Math.round(ageMs / 1000)}s)`);
           await restreamer.deleteProcess(streamId);

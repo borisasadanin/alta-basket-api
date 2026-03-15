@@ -317,9 +317,15 @@ export class OscInstanceManager {
     }
   }
 
+  /** Number of consecutive health check failures before marking as stopped */
+  private healthFailCount = 0;
+  private static readonly HEALTH_FAIL_THRESHOLD = 3; // 3 consecutive failures = stopped
+  private static readonly HEALTH_TIMEOUT_MS = 10_000; // 10s timeout (Restreamer can be slow under load)
+
   /**
    * Background liveness check — verifies Restreamer API is responsive.
-   * If state is "running" but the instance is unreachable, resets to "stopped".
+   * Requires multiple consecutive failures before marking as stopped,
+   * to avoid false positives when Restreamer is under load.
    * Called automatically by background polling timer.
    */
   private async backgroundHealthCheck(): Promise<InstanceState> {
@@ -332,7 +338,7 @@ export class OscInstanceManager {
         if (instance?.url) {
           // Instance exists — verify it's actually reachable
           const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 3000);
+          const timeout = setTimeout(() => controller.abort(), OscInstanceManager.HEALTH_TIMEOUT_MS);
           const res = await fetch(`${instance.url}/api/v3/process`, {
             headers: { Authorization: `Bearer ${sat}` },
             signal: controller.signal,
@@ -343,6 +349,7 @@ export class OscInstanceManager {
             const rtmpHost = await this.discoverRtmpHost(sat);
             this.cachedInfo = { url: instance.url, rtmpHost };
             this.state = "running";
+            this.healthFailCount = 0;
             this.log.info(`Recovered running Restreamer instance — URL: ${instance.url}, RTMP: ${rtmpHost}`);
             return "running";
           }
@@ -359,21 +366,34 @@ export class OscInstanceManager {
 
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 3000);
+      const timeout = setTimeout(() => controller.abort(), OscInstanceManager.HEALTH_TIMEOUT_MS);
       const res = await fetch(`${this.cachedInfo.url}/api/v3/process`, {
         headers: { Authorization: `Bearer ${await this.ctx.getServiceAccessToken(SERVICE_ID)}` },
         signal: controller.signal,
       });
       clearTimeout(timeout);
-      if (res.ok) return "running";
+      if (res.ok) {
+        this.healthFailCount = 0;
+        return "running";
+      }
     } catch {
-      // Instance unreachable
+      // Instance unreachable — might be a transient issue
     }
 
-    this.log.info("Restreamer liveness check failed — marking as stopped");
+    // Require multiple consecutive failures before marking as stopped.
+    // A single slow response (Restreamer encoding + S3 write) should not
+    // cause the backend to lose track of the running instance.
+    this.healthFailCount++;
+    if (this.healthFailCount < OscInstanceManager.HEALTH_FAIL_THRESHOLD) {
+      this.log.info(`Restreamer health check failed (${this.healthFailCount}/${OscInstanceManager.HEALTH_FAIL_THRESHOLD}) — will retry`);
+      return "running"; // Keep state as running, retry next poll
+    }
+
+    this.log.info(`Restreamer health check failed ${this.healthFailCount} times — marking as stopped`);
     this.state = "stopped";
     this.cachedInfo = null;
     this.startPromise = null;
+    this.healthFailCount = 0;
     return "stopped";
   }
 
