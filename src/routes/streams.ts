@@ -12,6 +12,7 @@ import { determineStreamStatus } from "../stream-status.js";
 import { uploadPauseSegments } from "../pause-segments.js";
 import { stitchPlaylist, buildPartList } from "../playlist-stitcher.js";
 import type { CreateStreamBody, StreamInfo, StreamPublicInfo, VodEntry } from "../types.js";
+import { getBroadcastState, setBroadcastState } from "../broadcast-state.js";
 
 export default async function streamRoutes(app: FastifyInstance): Promise<void> {
   // POST /api/streams — Create a new stream (or resume existing one for same device)
@@ -105,6 +106,12 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
 
       streamMeta.set(streamId, { name: displayName, createdAt: info.createdAt, deviceId, partNumber: 1, completedParts: [] });
 
+      // Auto-transition broadcast state to "live" (only if idle or upcoming)
+      const bState = getBroadcastState().status;
+      if (bState === "idle" || bState === "upcoming") {
+        setBroadcastState("live");
+      }
+
       // Create VOD entry with match metadata from request
       const homeTeam = team || "Älta IF";
       const awayTeam = opponent || "Motståndare";
@@ -174,6 +181,12 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
 
     oscManager.streamPaused();
 
+    // Auto-transition broadcast state to "paused" if all streams are now paused
+    const allPaused = [...streamMeta.values()].every((m) => m.stoppedAt || m.pausedAt);
+    if (allPaused) {
+      setBroadcastState("paused");
+    }
+
     return reply.code(200).send({ status: "paused", pausedAt: meta.pausedAt });
   });
 
@@ -217,6 +230,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
       // Restreamer recording disabled — SegmentCollector handles recording via HTTP polling
       await restreamer.createProcess(id, { recording: false, partNumber: meta.partNumber });
       oscManager.streamResumed();
+      setBroadcastState("live");
 
       // Start collecting segments for the new part
       const resumeCollector = new SegmentCollector(id, config.RESTREAMER_URL, minio, request.log, meta.partNumber);
@@ -550,6 +564,12 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
         request.log.warn(err, `Could not delete Restreamer process for ${id} (may already be stopped)`);
       });
 
+      // Auto-transition broadcast state to "ended" if no active streams remain
+      const hasActiveStreams = [...streamMeta.values()].some((m) => !m.stoppedAt);
+      if (!hasActiveStreams) {
+        setBroadcastState("ended");
+      }
+
       // Stitch playlist (always needed — all recordings use p1.m3u8, not index.m3u8)
       if (meta && meta.partNumber >= 1) {
         const parts = buildPartList(meta.completedParts, meta.partNumber);
@@ -639,6 +659,14 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
 
       // Sync the manager's active stream count with reality
       oscManager.syncActiveCount(activeCount);
+
+      // If no active streams remain and broadcast state is still live/paused, transition to ended
+      if (activeCount === 0) {
+        const bStatus = getBroadcastState().status;
+        if (bStatus === "live" || bStatus === "paused") {
+          setBroadcastState("ended");
+        }
+      }
 
       // Remove stopped metadata older than TTL
       const now = Date.now();

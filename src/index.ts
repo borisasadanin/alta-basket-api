@@ -16,6 +16,7 @@ import streamRoutes from "./routes/streams.js";
 import vodRoutes from "./routes/vod.js";
 import adminRoutes from "./routes/admin.js";
 import restreamerRoutes from "./routes/restreamer-routes.js";
+import broadcastRoutes from "./routes/broadcast-routes.js";
 
 // --- Validate required env vars (exits on failure) ---
 validateConfig();
@@ -62,6 +63,7 @@ await app.register(streamRoutes);
 await app.register(vodRoutes);
 await app.register(adminRoutes);
 await app.register(restreamerRoutes);
+await app.register(broadcastRoutes);
 
 // --- Health check ---
 app.get("/health", async () => {
