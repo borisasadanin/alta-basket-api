@@ -96,7 +96,7 @@ export class RestreamerClient {
     const outputs: { id: string; address: string; options: string[] }[] = [
       {
         id: "output",
-        address: `{memfs}/${streamId}.m3u8`,
+        address: `{memfs}/${this.memfsName(streamId, part)}.m3u8`,
         options: [
           "-codec",
           "copy",
@@ -189,15 +189,21 @@ export class RestreamerClient {
     return `rtmp://${this.rtmpHost}/live/${streamId}`;
   }
 
-  hlsUrl(streamId: string): string {
-    return `${this.baseUrl}/memfs/${streamId}.m3u8`;
+  /** memfs filename: part 1 → "streamId", part 2+ → "streamId_p2" */
+  private memfsName(streamId: string, partNumber: number): string {
+    return partNumber > 1 ? `${streamId}_p${partNumber}` : streamId;
   }
 
-  async isHlsLive(streamId: string): Promise<boolean> {
+  hlsUrl(streamId: string, partNumber = 1): string {
+    return `${this.baseUrl}/memfs/${this.memfsName(streamId, partNumber)}.m3u8`;
+  }
+
+  async isHlsLive(streamId: string, partNumber = 1): Promise<boolean> {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 5000);
-      const res = await fetch(`${this.baseUrl}/memfs/${streamId}.m3u8`, {
+      const url = `${this.baseUrl}/memfs/${this.memfsName(streamId, partNumber)}.m3u8`;
+      const res = await fetch(url, {
         method: "HEAD",
         signal: controller.signal,
       });

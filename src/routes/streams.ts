@@ -281,7 +281,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
           streams.push({
             id: streamId,
             name: meta.name,
-            hlsUrl: restreamer.hlsUrl(streamId),
+            hlsUrl: restreamer.hlsUrl(streamId, meta.partNumber),
             createdAt: meta.createdAt,
             status: "stopped",
             viewers: 0,
@@ -290,7 +290,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
           streams.push({
             id: streamId,
             name: meta.name,
-            hlsUrl: restreamer.hlsUrl(streamId),
+            hlsUrl: restreamer.hlsUrl(streamId, meta.partNumber),
             createdAt: meta.createdAt,
             status: "paused",
             viewers: getViewerCount(streamId),
@@ -300,7 +300,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
           streams.push({
             id: streamId,
             name: meta.name,
-            hlsUrl: restreamer.hlsUrl(streamId),
+            hlsUrl: restreamer.hlsUrl(streamId, meta.partNumber),
             createdAt: meta.createdAt,
             status: "waiting",
             viewers: getViewerCount(streamId),
@@ -333,7 +333,8 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
           // A process in "failed" state is not producing HLS, regardless of wasLive.
           const processExec = p.state?.exec;
           const processIsHealthy = processExec === "running";
-          const hlsLive = processIsHealthy ? await restreamer.isHlsLive(streamId) : false;
+          const partNum = meta?.partNumber ?? 1;
+          const hlsLive = processIsHealthy ? await restreamer.isHlsLive(streamId, partNum) : false;
 
           // Track whether stream was ever live
           if (hlsLive && meta) {
@@ -356,7 +357,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
           return {
             id: streamId,
             name: meta?.name || streamId,
-            hlsUrl: restreamer.hlsUrl(streamId),
+            hlsUrl: restreamer.hlsUrl(streamId, partNum),
             createdAt: meta?.createdAt || "",
             status,
             viewers: getViewerCount(streamId),
@@ -372,7 +373,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
         streams.push({
           id: streamId,
           name: meta.name,
-          hlsUrl: restreamer.hlsUrl(streamId),
+          hlsUrl: restreamer.hlsUrl(streamId, meta.partNumber),
           createdAt: meta.createdAt,
           status: "stopped",
           viewers: 0,
@@ -385,7 +386,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
         streams.push({
           id: streamId,
           name: meta.name,
-          hlsUrl: restreamer.hlsUrl(streamId),
+          hlsUrl: restreamer.hlsUrl(streamId, meta.partNumber),
           createdAt: meta.createdAt,
           status: "paused",
           viewers: getViewerCount(streamId),
@@ -401,7 +402,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
         streams.push({
           id: streamId,
           name: meta.name,
-          hlsUrl: restreamer.hlsUrl(streamId),
+          hlsUrl: restreamer.hlsUrl(streamId, meta.partNumber),
           createdAt: meta.createdAt,
           status: "waiting",
           viewers: getViewerCount(streamId),
@@ -425,6 +426,8 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
       const { id } = request.params;
       const meta = streamMeta.get(id);
 
+      const partNum = meta?.partNumber ?? 1;
+
       // Check if stopped (within TTL)
       if (meta?.stoppedAt) {
         const age = Date.now() - new Date(meta.stoppedAt).getTime();
@@ -432,7 +435,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
           return reply.send({
             id,
             name: meta.name,
-            hlsUrl: restreamer.hlsUrl(id),
+            hlsUrl: restreamer.hlsUrl(id, partNum),
             createdAt: meta.createdAt,
             status: "stopped",
             viewers: 0,
@@ -446,7 +449,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
         return reply.send({
           id,
           name: meta.name,
-          hlsUrl: restreamer.hlsUrl(id),
+          hlsUrl: restreamer.hlsUrl(id, partNum),
           createdAt: meta.createdAt,
           status: "paused",
           viewers: getViewerCount(id),
@@ -465,7 +468,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
             return reply.send({
               id,
               name: meta.name,
-              hlsUrl: restreamer.hlsUrl(id),
+              hlsUrl: restreamer.hlsUrl(id, partNum),
               createdAt: meta.createdAt,
               status: "waiting",
               viewers: getViewerCount(id),
@@ -477,7 +480,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
         // Check BOTH process state AND HLS manifest
         const processExec = process.state?.exec;
         const processIsHealthy = processExec === "running";
-        const hlsLive = processIsHealthy ? await restreamer.isHlsLive(id) : false;
+        const hlsLive = processIsHealthy ? await restreamer.isHlsLive(id, partNum) : false;
 
         // Track wasLive for accurate status
         if (hlsLive && meta) {
@@ -498,7 +501,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
         const info: StreamPublicInfo = {
           id,
           name: meta?.name || id,
-          hlsUrl: restreamer.hlsUrl(id),
+          hlsUrl: restreamer.hlsUrl(id, partNum),
           createdAt: meta?.createdAt || "",
           status,
           viewers: getViewerCount(id),
@@ -516,7 +519,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
           return reply.send({
             id,
             name: meta.name,
-            hlsUrl: restreamer.hlsUrl(id),
+            hlsUrl: restreamer.hlsUrl(id, partNum),
             createdAt: meta.createdAt,
             status: fallbackStatus,
             viewers: getViewerCount(id),

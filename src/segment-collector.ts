@@ -81,7 +81,8 @@ export class SegmentCollector {
     partNumber = 1,
   ) {
     this.streamId = streamId;
-    this.manifestUrl = `${restreamerBaseUrl}/memfs/${streamId}.m3u8`;
+    const memfsName = partNumber > 1 ? `${streamId}_p${partNumber}` : streamId;
+    this.manifestUrl = `${restreamerBaseUrl}/memfs/${memfsName}.m3u8`;
     this.segmentBaseUrl = `${restreamerBaseUrl}/memfs/`;
     this.minio = minio;
     this.logger = logger;
