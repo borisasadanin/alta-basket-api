@@ -227,6 +227,16 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
     meta.wasLive = false;
 
     try {
+      // Ensure old process is fully removed before creating the new one.
+      // The pause handler fires deleteProcess as fire-and-forget, so it may
+      // still be in flight. Without this guard the async delete can race with
+      // createProcess (same process ID) and kill the *new* process.
+      try {
+        await restreamer.deleteProcess(id);
+      } catch {
+        // Already deleted — expected after a normal pause
+      }
+
       // Restreamer recording disabled — SegmentCollector handles recording via HTTP polling
       await restreamer.createProcess(id, { recording: false, partNumber: meta.partNumber });
       oscManager.streamResumed();
