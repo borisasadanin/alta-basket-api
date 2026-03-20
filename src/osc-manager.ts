@@ -24,6 +24,7 @@ export interface S3StorageConfig {
 
 interface OscManagerOptions {
   instanceName: string;
+  personalAccessToken?: string;
   gracePeriodMs?: number;
   startupTimeoutMs?: number;
   healthPollMs?: number;
@@ -50,7 +51,9 @@ export class OscInstanceManager {
   private bgPollRunning = false;
 
   constructor(opts: OscManagerOptions) {
-    this.ctx = new Context();
+    this.ctx = opts.personalAccessToken
+      ? new Context({ personalAccessToken: opts.personalAccessToken })
+      : new Context();
     this.instanceName = opts.instanceName;
     this.gracePeriodMs = opts.gracePeriodMs ?? 15 * 60 * 1000;
     this.startupTimeoutMs = opts.startupTimeoutMs ?? 180_000;

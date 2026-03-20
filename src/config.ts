@@ -11,10 +11,13 @@ const API_KEY = process.env.API_KEY || "alta-basket-2026";
 const ADMIN_PIN = process.env.ADMIN_PIN || "804480";
 const VIEWER_PIN = process.env.VIEWER_PIN || "123456";
 const OSC_PAT = process.env.OSC_ACCESS_TOKEN || "";
+const OSC_RESTREAMER_TOKEN = process.env.OSC_RESTREAMER_TOKEN ||
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpYXQiOjE3NzQwMjIxMzAsInRlbmFudElkIjoiZXlldmlubmxhYiIsInVzZXJJZCI6IjY1OWQyNzM3ZWE2YmM3ZWQ5ZjJlNDg4NiIsInBhdElkIjoiYTI1YmYzZWItMjE4NS00ZGM5LWEzNjgtNmI2MDkzODM2MDU0IiwiZXhwIjoxNzgxNzk4MTMwLCJpc3MiOiJ0b2tlbi5vc2Fhcy5leWV2aW5uLnNlIn0.mHf2O3BcAcyFy5YUCEhKVtThgi0cUzdXsG0EOZJksDw";
 const OSC_INSTANCE_NAME = process.env.OSC_INSTANCE_NAME || "restreamerlive";
+const OSC_RESTREAMER_TENANT = process.env.OSC_RESTREAMER_TENANT || "eyevinnlab";
 const RESTREAMER_URL =
   process.env.RESTREAMER_URL ||
-  `https://borispriv-${OSC_INSTANCE_NAME}.datarhei-restreamer.auto.prod.osaas.io`;
+  `https://${OSC_RESTREAMER_TENANT}-${OSC_INSTANCE_NAME}.datarhei-restreamer.auto.prod.osaas.io`;
 const RESTREAMER_GRACE_PERIOD_MS = parseInt(
   process.env.RESTREAMER_GRACE_PERIOD_MS || String(60 * 60 * 1000),
   10
@@ -62,7 +65,9 @@ export const config = {
   ADMIN_PIN,
   VIEWER_PIN,
   OSC_PAT,
+  OSC_RESTREAMER_TOKEN,
   OSC_INSTANCE_NAME,
+  OSC_RESTREAMER_TENANT,
   RESTREAMER_URL,
   RESTREAMER_GRACE_PERIOD_MS,
   MINIO_ENDPOINT,

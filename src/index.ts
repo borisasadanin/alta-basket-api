@@ -21,12 +21,19 @@ import broadcastRoutes from "./routes/broadcast-routes.js";
 // --- Validate required env vars (exits on failure) ---
 validateConfig();
 
+// --- Log Restreamer tenant for debugging ---
+try {
+  const payload = JSON.parse(Buffer.from(config.OSC_RESTREAMER_TOKEN.split(".")[1], "base64").toString());
+  console.log(`Restreamer tenant: ${payload.tenantId}, URL: ${config.RESTREAMER_URL}`);
+} catch { console.warn("Could not decode Restreamer token"); }
+
 // --- Create service instances ---
 
-const restreamer = new RestreamerClient(config.RESTREAMER_URL, config.OSC_PAT, "");
+const restreamer = new RestreamerClient(config.RESTREAMER_URL, config.OSC_RESTREAMER_TOKEN, "");
 const minio = new MinioClient(config.MINIO_ENDPOINT, config.MINIO_ACCESS_KEY, config.MINIO_SECRET_KEY);
 const oscManager = new OscInstanceManager({
   instanceName: config.OSC_INSTANCE_NAME,
+  personalAccessToken: config.OSC_RESTREAMER_TOKEN,
   gracePeriodMs: config.RESTREAMER_GRACE_PERIOD_MS,
   logger: undefined as unknown as { info: (...args: unknown[]) => void; error: (...args: unknown[]) => void },
   s3Config: {
