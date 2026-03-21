@@ -3,6 +3,7 @@
  */
 import type { FastifyInstance } from "fastify";
 import { requireAdminAuth } from "../auth.js";
+import { config } from "../config.js";
 import { minio } from "../state.js";
 
 export default async function adminRoutes(app: FastifyInstance): Promise<void> {
@@ -26,8 +27,11 @@ export default async function adminRoutes(app: FastifyInstance): Promise<void> {
         })
         .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
+      const capacityBytes = config.MINIO_STORAGE_CAPACITY_GB * 1024 * 1024 * 1024;
+
       return reply.send({
         totalBytes: storageInfo.totalBytes,
+        capacityBytes,
         vodCount: vods.length,
         vods,
       });

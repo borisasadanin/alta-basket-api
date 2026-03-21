@@ -29,6 +29,10 @@ const MINIO_ENDPOINT =
 const MINIO_ACCESS_KEY = process.env.MINIO_ACCESS_KEY || "root";
 const MINIO_SECRET_KEY = process.env.MINIO_SECRET_KEY || "37be8999e5d3d04615705921defbaea9";
 const MINIO_RECORDINGS_BUCKET = "recordings";
+const MINIO_STORAGE_CAPACITY_GB = parseInt(
+  process.env.MINIO_STORAGE_CAPACITY_GB || "50",
+  10
+);
 
 const VIEWER_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const ADMIN_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
@@ -74,6 +78,7 @@ export const config = {
   MINIO_ACCESS_KEY,
   MINIO_SECRET_KEY,
   MINIO_RECORDINGS_BUCKET,
+  MINIO_STORAGE_CAPACITY_GB,
   VIEWER_TOKEN_TTL_MS,
   ADMIN_TOKEN_TTL_MS,
   STOPPED_TTL_MS,
