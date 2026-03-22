@@ -10,8 +10,10 @@ import type { MinioClient } from "./minio.js";
 import type { HighlightClip } from "./types.js";
 import type { FastifyBaseLogger } from "fastify";
 
-/** How many seconds of video to include in a clip */
-const CLIP_DURATION_SECONDS = 10;
+/** How many seconds of video to include in a clip.
+ * With ~2s segments this gives us 4 segments = ~8s (≈5s before + 2s after the action).
+ */
+const CLIP_DURATION_SECONDS = 8;
 
 /** Max time to wait for pipeline to deliver segments (ms) */
 const MAX_WAIT_MS = 15_000;
@@ -62,16 +64,11 @@ export async function createClip(
     throw new Error("No segments available for clipping");
   }
 
-  // Find the cut point: last segment saved at or before the button press time
-  let cutIndex = timeline.length - 1;
-  for (let i = timeline.length - 1; i >= 0; i--) {
-    if (timeline[i].savedAt <= buttonPressTimestamp) {
-      cutIndex = i;
-      break;
-    }
-  }
-
-  // Calculate how many segments we need to cover CLIP_DURATION_SECONDS
+  // Take the last N seconds of available segments.
+  // After the pipeline wait above, the newest segments correspond to
+  // roughly the moment the button was pressed (accounting for pipeline latency).
+  // We simply walk backwards from the end of the timeline.
+  const cutIndex = timeline.length - 1;
   let totalDuration = 0;
   let startIndex = cutIndex;
   for (let i = cutIndex; i >= 0; i--) {
