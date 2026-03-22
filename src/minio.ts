@@ -141,6 +141,16 @@ export class MinioClient {
     return `${this.endpoint}/${BUCKET}/${streamId}/index.m3u8`;
   }
 
+  /** Public URL for a highlight clip manifest */
+  clipHlsUrl(streamId: string, clipId: string): string {
+    return `${this.endpoint}/${BUCKET}/clips/${streamId}/${clipId}.m3u8`;
+  }
+
+  /** Public URL for a segment in the recordings bucket */
+  segmentUrl(key: string): string {
+    return `${this.endpoint}/${BUCKET}/${key}`;
+  }
+
   /** Get total size of all objects under a prefix (streamId/) in bytes */
   async getVodSize(streamId: string): Promise<number> {
     let totalSize = 0;

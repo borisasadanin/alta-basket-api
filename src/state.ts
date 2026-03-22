@@ -5,6 +5,7 @@ import { RestreamerClient } from "./restreamer.js";
 import { OscInstanceManager } from "./osc-manager.js";
 import { MinioClient } from "./minio.js";
 import type { SegmentCollector } from "./segment-collector.js";
+import type { HighlightClip } from "./types.js";
 
 export interface StreamMeta {
   name: string;
@@ -25,6 +26,9 @@ export const streamMeta = new Map<string, StreamMeta>();
 
 /** Active segment collectors — one per recording stream */
 export const collectors = new Map<string, SegmentCollector>();
+
+/** In-memory highlight clips per stream */
+export const clipsByStream = new Map<string, HighlightClip[]>();
 
 /**
  * Service singletons — set once at startup by index.ts.

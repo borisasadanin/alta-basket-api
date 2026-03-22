@@ -5,7 +5,7 @@
 import type { FastifyInstance } from "fastify";
 import { config } from "../config.js";
 import { requireApiKey, requireViewerAuth } from "../auth.js";
-import { streamMeta, restreamer, minio, oscManager, collectors } from "../state.js";
+import { streamMeta, restreamer, minio, oscManager, collectors, clipsByStream } from "../state.js";
 import { SegmentCollector } from "../segment-collector.js";
 import { getViewerCount, registerViewer, viewers } from "../viewer-tracking.js";
 import { determineStreamStatus } from "../stream-status.js";
@@ -615,6 +615,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
       for (const [streamId, meta] of streamMeta) {
         if (meta.stoppedAt && now - new Date(meta.stoppedAt).getTime() > config.STOPPED_TTL_MS) {
           streamMeta.delete(streamId);
+          clipsByStream.delete(streamId);
         }
       }
       return;
@@ -686,6 +687,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
       for (const [streamId, meta] of streamMeta) {
         if (meta.stoppedAt && now - new Date(meta.stoppedAt).getTime() > config.STOPPED_TTL_MS) {
           streamMeta.delete(streamId);
+          clipsByStream.delete(streamId);
         }
       }
     } catch (err) {

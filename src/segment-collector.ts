@@ -6,15 +6,20 @@
 import type { MinioClient } from "./minio.js";
 import type { FastifyBaseLogger } from "fastify";
 
-interface SegmentInfo {
+interface ParsedSegment {
   filename: string;
   duration: number;
 }
 
+interface SegmentInfo extends ParsedSegment {
+  /** Wall-clock timestamp when this segment was saved to MinIO */
+  savedAt: number;
+}
+
 /** Parse #EXTINF + segment filename pairs from an HLS media playlist. */
-export function parseSegments(manifest: string): SegmentInfo[] {
+export function parseSegments(manifest: string): ParsedSegment[] {
   const lines = manifest.split("\n");
-  const segments: SegmentInfo[] = [];
+  const segments: ParsedSegment[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     if (line.startsWith("#EXTINF:")) {
@@ -112,6 +117,24 @@ export class SegmentCollector {
     return this.running;
   }
 
+  getStreamId(): string {
+    return this.streamId;
+  }
+
+  getPartNumber(): number {
+    return this.partNumber;
+  }
+
+  /** Return the ordered list of saved segments with MinIO keys and wall-clock timestamps. */
+  getSegmentTimeline(): { filename: string; duration: number; savedAt: number; key: string }[] {
+    return this.segmentOrder.map((s) => ({
+      filename: s.filename,
+      duration: s.duration,
+      savedAt: s.savedAt,
+      key: `${this.streamId}/p${this.partNumber}_${s.filename}`,
+    }));
+  }
+
   // --- private ---
 
   private stopTimer(): void {
@@ -167,7 +190,7 @@ export class SegmentCollector {
         await this.minio.uploadBuffer(key, Buffer.from(ab), "video/mp2t");
 
         this.savedSegments.add(seg.filename);
-        this.segmentOrder.push(seg);
+        this.segmentOrder.push({ ...seg, savedAt: Date.now() });
         this.logger.info(`Saved segment ${seg.filename} (${ab.byteLength} bytes)`);
       } catch (err) {
         this.logger.warn(err, `Failed to save segment ${seg.filename}`);

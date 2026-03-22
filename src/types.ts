@@ -42,6 +42,15 @@ export interface RestreamerProcess {
   metadata?: Record<string, unknown>;
 }
 
+export interface HighlightClip {
+  id: string;
+  streamId: string;
+  hlsUrl: string;
+  durationSeconds: number;
+  createdAt: string;
+  label?: string;
+}
+
 export interface VodEntry {
   id: string;
   matchTitle: string;
