@@ -59,11 +59,12 @@ export default async function clipRoutes(app: FastifyInstance): Promise<void> {
           body.label,
         );
 
-        // Store in-memory
+        // Store in-memory + persist to MinIO
         if (!clipsByStream.has(id)) {
           clipsByStream.set(id, []);
         }
         clipsByStream.get(id)!.push(clip);
+        await minio.addClipEntry(clip);
 
         return reply.code(201).send(clip);
       } catch (err) {
@@ -76,7 +77,7 @@ export default async function clipRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
-  // GET /api/streams/:id/clips — List highlight clips for a stream
+  // GET /api/streams/:id/clips — List highlight clips for a stream (live in-memory)
   app.get<{ Params: { id: string } }>(
     "/api/streams/:id/clips",
     async (request, reply) => {
@@ -84,6 +85,19 @@ export default async function clipRoutes(app: FastifyInstance): Promise<void> {
 
       const { id } = request.params;
       const clips = clipsByStream.get(id) || [];
+
+      // Return newest first
+      return reply.send([...clips].reverse());
+    },
+  );
+
+  // GET /api/clips — List ALL highlight clips (persistent, from MinIO index)
+  app.get(
+    "/api/clips",
+    async (request, reply) => {
+      if (!requireViewerAuth(request, reply)) return;
+
+      const clips = await minio.readClipsIndex();
 
       // Return newest first
       return reply.send([...clips].reverse());

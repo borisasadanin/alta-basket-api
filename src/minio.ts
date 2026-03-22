@@ -8,10 +8,11 @@ import {
   ListObjectsV2Command,
   DeleteObjectsCommand,
 } from "@aws-sdk/client-s3";
-import type { VodEntry } from "./types.js";
+import type { VodEntry, HighlightClip } from "./types.js";
 
 const BUCKET = "recordings";
 const VOD_INDEX_KEY = "vod-index.json";
+const CLIPS_INDEX_KEY = "clips-index.json";
 
 export class MinioClient {
   private s3: S3Client;
@@ -133,6 +134,44 @@ export class MinioClient {
       if (filtered.length === entries.length) return false;
       await this.writeVodIndex(filtered);
       return true;
+    });
+  }
+
+  // ============================
+  // Clips index (persistent, like VOD index)
+  // ============================
+
+  /** Read the clips index from MinIO. Returns [] if not found. */
+  async readClipsIndex(): Promise<HighlightClip[]> {
+    try {
+      const res = await this.s3.send(
+        new GetObjectCommand({ Bucket: BUCKET, Key: CLIPS_INDEX_KEY })
+      );
+      const body = await res.Body?.transformToString();
+      return body ? JSON.parse(body) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** Write the clips index to MinIO. */
+  async writeClipsIndex(entries: HighlightClip[]): Promise<void> {
+    await this.s3.send(
+      new PutObjectCommand({
+        Bucket: BUCKET,
+        Key: CLIPS_INDEX_KEY,
+        Body: JSON.stringify(entries, null, 2),
+        ContentType: "application/json",
+      })
+    );
+  }
+
+  /** Add a new clip entry and persist (mutex-protected). */
+  async addClipEntry(entry: HighlightClip): Promise<void> {
+    return this.withLock(async () => {
+      const entries = await this.readClipsIndex();
+      entries.push(entry);
+      await this.writeClipsIndex(entries);
     });
   }
 
