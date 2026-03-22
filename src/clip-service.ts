@@ -45,9 +45,9 @@ export async function createClip(
     }
 
     const newest = timeline[timeline.length - 1];
-    // If the newest segment was saved after (or close to) the button press,
-    // the pipeline has caught up enough
-    if (newest.savedAt >= buttonPressTimestamp - FRESHNESS_THRESHOLD_MS) {
+    // Wait until we have a segment saved AFTER the button press,
+    // so the clip includes ~1 segment of "aftermath" (the goal celebration etc.)
+    if (newest.savedAt >= buttonPressTimestamp + 2_000) {
       break;
     }
 
