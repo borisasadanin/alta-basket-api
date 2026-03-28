@@ -92,6 +92,25 @@ export default async function clipRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  // GET /api/clips/:id/public — Get a specific clip without auth (for clip.html sharing)
+  app.get<{ Params: { id: string } }>(
+    "/api/clips/:id/public",
+    async (request, reply) => {
+      const { id } = request.params;
+      try {
+        const clips = await minio.readClipsIndex();
+        const clip = clips.find((c) => c.id === id);
+        if (!clip) {
+          return reply.code(404).send({ error: "clip_not_found", message: "Klippet hittades inte" });
+        }
+        return reply.send(clip);
+      } catch (err) {
+        request.log.error(err, "Failed to read clip");
+        return reply.code(500).send({ error: "read_failed", message: "Kunde inte läsa klipp" });
+      }
+    },
+  );
+
   // GET /api/clips/:id — Get a specific highlight clip by ID
   app.get<{ Params: { id: string } }>(
     "/api/clips/:id",
