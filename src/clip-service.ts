@@ -9,6 +9,7 @@ import type { SegmentCollector } from "./segment-collector.js";
 import type { MinioClient } from "./minio.js";
 import type { HighlightClip } from "./types.js";
 import type { FastifyBaseLogger } from "fastify";
+import { convertSegmentsToMp4 } from "./mp4-converter.js";
 
 /** How many seconds of video to include in a clip.
  * With ~2s segments this gives us 4 segments = ~8s (≈5s before + 2s after the action).
@@ -112,10 +113,29 @@ export async function createClip(
     `Created clip ${clipId} for ${streamId}: ${clipSegments.length} segments, ${actualDuration.toFixed(1)}s`,
   );
 
+  // Generate MP4 (best-effort — clip works without it via HLS)
+  let mp4Url: string | undefined;
+  try {
+    const segmentBuffers = await Promise.all(
+      clipSegments.map(async (seg) => ({
+        key: seg.key,
+        data: await minio.downloadBuffer(seg.key),
+      })),
+    );
+    const mp4Buffer = await convertSegmentsToMp4(segmentBuffers);
+    const mp4Key = `clips/${streamId}/${clipId}.mp4`;
+    await minio.uploadBuffer(mp4Key, mp4Buffer, "video/mp4");
+    mp4Url = minio.clipMp4Url(streamId, clipId);
+    logger.info(`Created MP4 for clip ${clipId} (${mp4Buffer.length} bytes)`);
+  } catch (err) {
+    logger.warn(err, `Failed to create MP4 for clip ${clipId} — HLS-only`);
+  }
+
   return {
     id: clipId,
     streamId,
     hlsUrl,
+    mp4Url,
     durationSeconds: Math.round(actualDuration * 10) / 10,
     createdAt: new Date().toISOString(),
     label,

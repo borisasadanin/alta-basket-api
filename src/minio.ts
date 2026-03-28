@@ -185,6 +185,11 @@ export class MinioClient {
     return `${this.endpoint}/${BUCKET}/clips/${streamId}/${clipId}.m3u8`;
   }
 
+  /** Public URL for a highlight clip MP4 */
+  clipMp4Url(streamId: string, clipId: string): string {
+    return `${this.endpoint}/${BUCKET}/clips/${streamId}/${clipId}.mp4`;
+  }
+
   /** Public URL for a segment in the recordings bucket */
   segmentUrl(key: string): string {
     return `${this.endpoint}/${BUCKET}/${key}`;
@@ -240,6 +245,16 @@ export class MinioClient {
         ContentType: contentType,
       })
     );
+  }
+
+  /** Download a file from the recordings bucket as a Buffer */
+  async downloadBuffer(key: string): Promise<Buffer> {
+    const res = await this.s3.send(
+      new GetObjectCommand({ Bucket: BUCKET, Key: key })
+    );
+    const bytes = await res.Body?.transformToByteArray();
+    if (!bytes) throw new Error(`Empty response for key: ${key}`);
+    return Buffer.from(bytes);
   }
 
   /** Read a text file from the recordings bucket. Returns null if not found. */

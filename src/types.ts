@@ -46,6 +46,7 @@ export interface HighlightClip {
   id: string;
   streamId: string;
   hlsUrl: string;
+  mp4Url?: string;
   durationSeconds: number;
   createdAt: string;
   label?: string;

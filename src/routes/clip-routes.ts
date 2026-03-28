@@ -5,6 +5,7 @@ import type { FastifyInstance } from "fastify";
 import { requireApiKey, requireViewerAuth } from "../auth.js";
 import { streamMeta, collectors, clipsByStream, minio } from "../state.js";
 import { createClip } from "../clip-service.js";
+import { convertSegmentsToMp4 } from "../mp4-converter.js";
 
 /** Track last clip time per stream to prevent spam */
 const lastClipTime = new Map<string, number>();
@@ -122,6 +123,76 @@ export default async function clipRoutes(app: FastifyInstance): Promise<void> {
 
       // Return newest first
       return reply.send([...clips].reverse());
+    },
+  );
+
+  // POST /api/clips/backfill-mp4 — Generate MP4 for existing clips that lack it (admin only)
+  app.post(
+    "/api/clips/backfill-mp4",
+    async (request, reply) => {
+      if (!requireApiKey(request, reply)) return;
+
+      const clips = await minio.readClipsIndex();
+      const missing = clips.filter((c) => !c.mp4Url);
+
+      if (missing.length === 0) {
+        return reply.send({ message: "All clips already have MP4", converted: 0 });
+      }
+
+      let converted = 0;
+      const errors: string[] = [];
+
+      for (const clip of missing) {
+        try {
+          // Read the HLS manifest to find segment URLs
+          const manifestKey = `clips/${clip.streamId}/${clip.id}.m3u8`;
+          const manifest = await minio.readFile(manifestKey);
+          if (!manifest) {
+            errors.push(`${clip.id}: manifest not found`);
+            continue;
+          }
+
+          // Parse segment URLs from manifest
+          const segmentUrls = manifest
+            .split("\n")
+            .filter((line) => line.startsWith("http") && line.endsWith(".ts"));
+
+          if (segmentUrls.length === 0) {
+            errors.push(`${clip.id}: no segments in manifest`);
+            continue;
+          }
+
+          // Download segments (extract MinIO key from full URL)
+          const segmentBuffers = await Promise.all(
+            segmentUrls.map(async (url) => {
+              // URL: https://.../recordings/streamId/filename.ts → key: streamId/filename.ts
+              const key = url.split("/recordings/")[1];
+              if (!key) throw new Error(`Cannot parse key from URL: ${url}`);
+              return { key, data: await minio.downloadBuffer(key) };
+            }),
+          );
+
+          // Convert to MP4
+          const mp4Buffer = await convertSegmentsToMp4(segmentBuffers);
+          const mp4Key = `clips/${clip.streamId}/${clip.id}.mp4`;
+          await minio.uploadBuffer(mp4Key, mp4Buffer, "video/mp4");
+
+          clip.mp4Url = minio.clipMp4Url(clip.streamId, clip.id);
+          converted++;
+          request.log.info(`Backfilled MP4 for clip ${clip.id} (${mp4Buffer.length} bytes)`);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          errors.push(`${clip.id}: ${msg}`);
+          request.log.warn(err, `Failed to backfill MP4 for clip ${clip.id}`);
+        }
+      }
+
+      // Save updated index with mp4Urls
+      if (converted > 0) {
+        await minio.writeClipsIndex(clips);
+      }
+
+      return reply.send({ converted, errors: errors.length > 0 ? errors : undefined });
     },
   );
 }
