@@ -124,9 +124,23 @@ export default async function clipRoutes(app: FastifyInstance): Promise<void> {
         }
 
         const label = clip.label || "Höjdpunkt";
-        const title = `${label} — Älta Courtside`;
         const clipPageUrl = `https://altacourtside.se/clip.html#${encodeURIComponent(clip.id)}`;
         const videoUrl = clip.mp4Url || "";
+
+        // Look up match info from VOD index
+        let matchTitle = "";
+        try {
+          const vods = await minio.readVodIndex();
+          const vod = vods.find((v) => v.id === clip.streamId);
+          if (vod) matchTitle = vod.matchTitle || "";
+        } catch { /* ignore — description will just be generic */ }
+
+        const title = matchTitle
+          ? `${label} — ${matchTitle}`
+          : `${label} — Älta Courtside`;
+        const description = matchTitle
+          ? `Höjdpunkt från ${matchTitle} — Älta Courtside`
+          : "Höjdpunkt från matchen — Älta Courtside";
 
         // Detect bot crawlers (WhatsApp, Facebook, Telegram, etc.)
         const ua = (request.headers["user-agent"] || "").toLowerCase();
@@ -145,7 +159,7 @@ export default async function clipRoutes(app: FastifyInstance): Promise<void> {
 <meta charset="UTF-8">
 <meta property="og:type" content="video.other">
 <meta property="og:title" content="${title}">
-<meta property="og:description" content="Se höjdpunkten från matchen.">
+<meta property="og:description" content="${description}">
 <meta property="og:image" content="${clip.thumbnailUrl || "https://altacourtside.se/icon.png"}">
 ${videoUrl ? `<meta property="og:video" content="${videoUrl}">
 <meta property="og:video:secure_url" content="${videoUrl}">
