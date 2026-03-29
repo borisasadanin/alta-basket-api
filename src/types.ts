@@ -10,6 +10,8 @@ export interface StreamPublicInfo {
   id: string;
   name: string;
   hlsUrl: string;
+  /** DVR playlist URL — serves all collected segments for catch-up playback */
+  dvrUrl?: string;
   createdAt: string;
   status: "live" | "waiting" | "stopped" | "paused";
   viewers: number;

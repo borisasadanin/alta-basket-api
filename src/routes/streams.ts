@@ -14,6 +14,11 @@ import { stitchPlaylist, buildPartList } from "../playlist-stitcher.js";
 import type { CreateStreamBody, StreamInfo, StreamPublicInfo, VodEntry } from "../types.js";
 import { getBroadcastState, setBroadcastState } from "../broadcast-state.js";
 
+/** DVR playlist URL for a stream (relative path — frontend prepends API base). */
+function dvrUrl(id: string): string {
+  return `/api/streams/${id}/dvr.m3u8`;
+}
+
 export default async function streamRoutes(app: FastifyInstance): Promise<void> {
   // POST /api/streams — Create a new stream (or resume existing one for same device)
   app.post<{ Body: CreateStreamBody }>("/api/streams", async (request, reply) => {
@@ -291,6 +296,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
             id: streamId,
             name: meta.name,
             hlsUrl: restreamer.hlsUrl(streamId, meta.partNumber),
+            dvrUrl: dvrUrl(streamId),
             createdAt: meta.createdAt,
             status: "paused",
             viewers: getViewerCount(streamId),
@@ -301,6 +307,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
             id: streamId,
             name: meta.name,
             hlsUrl: restreamer.hlsUrl(streamId, meta.partNumber),
+            dvrUrl: dvrUrl(streamId),
             createdAt: meta.createdAt,
             status: "waiting",
             viewers: getViewerCount(streamId),
@@ -358,6 +365,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
             id: streamId,
             name: meta?.name || streamId,
             hlsUrl: restreamer.hlsUrl(streamId, partNum),
+            dvrUrl: dvrUrl(streamId),
             createdAt: meta?.createdAt || "",
             status,
             viewers: getViewerCount(streamId),
@@ -387,6 +395,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
           id: streamId,
           name: meta.name,
           hlsUrl: restreamer.hlsUrl(streamId, meta.partNumber),
+          dvrUrl: dvrUrl(streamId),
           createdAt: meta.createdAt,
           status: "paused",
           viewers: getViewerCount(streamId),
@@ -403,6 +412,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
           id: streamId,
           name: meta.name,
           hlsUrl: restreamer.hlsUrl(streamId, meta.partNumber),
+          dvrUrl: dvrUrl(streamId),
           createdAt: meta.createdAt,
           status: "waiting",
           viewers: getViewerCount(streamId),
@@ -450,6 +460,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
           id,
           name: meta.name,
           hlsUrl: restreamer.hlsUrl(id, partNum),
+          dvrUrl: dvrUrl(id),
           createdAt: meta.createdAt,
           status: "paused",
           viewers: getViewerCount(id),
@@ -469,6 +480,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
               id,
               name: meta.name,
               hlsUrl: restreamer.hlsUrl(id, partNum),
+              dvrUrl: dvrUrl(id),
               createdAt: meta.createdAt,
               status: "waiting",
               viewers: getViewerCount(id),
@@ -502,6 +514,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
           id,
           name: meta?.name || id,
           hlsUrl: restreamer.hlsUrl(id, partNum),
+          dvrUrl: dvrUrl(id),
           createdAt: meta?.createdAt || "",
           status,
           viewers: getViewerCount(id),
@@ -520,6 +533,7 @@ export default async function streamRoutes(app: FastifyInstance): Promise<void> 
             id,
             name: meta.name,
             hlsUrl: restreamer.hlsUrl(id, partNum),
+            dvrUrl: dvrUrl(id),
             createdAt: meta.createdAt,
             status: fallbackStatus,
             viewers: getViewerCount(id),

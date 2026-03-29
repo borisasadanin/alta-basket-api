@@ -111,6 +111,51 @@ export default async function clipRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  // GET /api/clips/:id/og — Open Graph HTML for WhatsApp/social media link previews
+  app.get<{ Params: { id: string } }>(
+    "/api/clips/:id/og",
+    async (request, reply) => {
+      const { id } = request.params;
+      try {
+        const clips = await minio.readClipsIndex();
+        const clip = clips.find((c) => c.id === id);
+        if (!clip) {
+          return reply.code(404).type("text/html").send("<h1>Klippet hittades inte</h1>");
+        }
+
+        const label = clip.label || "Höjdpunkt";
+        const title = `${label} — Älta Courtside`;
+        const clipPageUrl = `https://altacourtside.se/clip.html#${encodeURIComponent(clip.id)}`;
+        const videoUrl = clip.mp4Url || "";
+
+        const html = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta property="og:type" content="video.other">
+<meta property="og:title" content="${title}">
+<meta property="og:description" content="Se höjdpunkten från matchen.">
+<meta property="og:image" content="https://altacourtside.se/icon.png">
+${videoUrl ? `<meta property="og:video" content="${videoUrl}">
+<meta property="og:video:secure_url" content="${videoUrl}">
+<meta property="og:video:type" content="video/mp4">
+<meta property="og:video:width" content="1280">
+<meta property="og:video:height" content="720">` : ""}
+<meta property="og:url" content="${clipPageUrl}">
+<meta http-equiv="refresh" content="0;url=${clipPageUrl}">
+<title>${title}</title>
+</head>
+<body><p>Omdirigerar...</p></body>
+</html>`;
+
+        return reply.type("text/html").send(html);
+      } catch (err) {
+        request.log.error(err, "Failed to serve OG page for clip");
+        return reply.code(500).type("text/html").send("<h1>Serverfel</h1>");
+      }
+    },
+  );
+
   // GET /api/clips/:id — Get a specific highlight clip by ID
   app.get<{ Params: { id: string } }>(
     "/api/clips/:id",

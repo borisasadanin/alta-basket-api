@@ -18,6 +18,7 @@ import adminRoutes from "./routes/admin.js";
 import restreamerRoutes from "./routes/restreamer-routes.js";
 import broadcastRoutes from "./routes/broadcast-routes.js";
 import clipRoutes from "./routes/clip-routes.js";
+import dvrRoutes from "./routes/dvr.js";
 
 // --- Validate required env vars (exits on failure) ---
 validateConfig();
@@ -73,6 +74,7 @@ await app.register(adminRoutes);
 await app.register(restreamerRoutes);
 await app.register(broadcastRoutes);
 await app.register(clipRoutes);
+await app.register(dvrRoutes);
 
 // --- Health check ---
 app.get("/health", async () => {
