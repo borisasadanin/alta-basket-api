@@ -92,7 +92,7 @@ export async function extractThumbnail(
         "-i", logoPath,
         "-frames:v", "1",
         "-filter_complex",
-        "[1:v]scale=iw*0.08:-1[logo];[0:v][logo]overlay=W-w-20:H-h-16",
+        "[1:v]scale=w=100:h=-1[logo];[0:v][logo]overlay=W-w-20:H-h-16",
         "-q:v", "3",
         outputPath,
       ], { timeout: 15_000 });
