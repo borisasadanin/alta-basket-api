@@ -128,6 +128,17 @@ export default async function clipRoutes(app: FastifyInstance): Promise<void> {
         const clipPageUrl = `https://altacourtside.se/clip.html#${encodeURIComponent(clip.id)}`;
         const videoUrl = clip.mp4Url || "";
 
+        // Detect bot crawlers (WhatsApp, Facebook, Telegram, etc.)
+        const ua = (request.headers["user-agent"] || "").toLowerCase();
+        const isBot = /whatsapp|facebookexternalhit|telegrambot|twitterbot|linkedinbot|slackbot|discordbot|bot|crawler|spider/i.test(ua);
+
+        // For bots: serve OG tags only (no redirect, so crawler reads meta)
+        // For humans: redirect to clip page via JS (after a brief moment)
+        const redirectTag = isBot
+          ? ""
+          : `<meta http-equiv="refresh" content="1;url=${clipPageUrl}">
+<script>setTimeout(function(){window.location.href="${clipPageUrl}"},800)</script>`;
+
         const html = `<!DOCTYPE html>
 <html>
 <head>
@@ -141,8 +152,7 @@ ${videoUrl ? `<meta property="og:video" content="${videoUrl}">
 <meta property="og:video:type" content="video/mp4">
 <meta property="og:video:width" content="1280">
 <meta property="og:video:height" content="720">` : ""}
-<meta property="og:url" content="${clipPageUrl}">
-<meta http-equiv="refresh" content="0;url=${clipPageUrl}">
+${redirectTag}
 <title>${title}</title>
 </head>
 <body><p>Omdirigerar...</p></body>
