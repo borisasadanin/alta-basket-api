@@ -285,13 +285,17 @@ ${redirectTag}
   );
 
   // POST /api/clips/backfill-thumbnails — Generate thumbnails for clips that have MP4 but no thumbnail
-  app.post(
+  // Add ?force=true to regenerate all thumbnails (e.g. after logo change)
+  app.post<{ Querystring: { force?: string } }>(
     "/api/clips/backfill-thumbnails",
     async (request, reply) => {
       if (!requireApiKey(request, reply)) return;
 
+      const force = request.query.force === "true";
       const clips = await minio.readClipsIndex();
-      const missing = clips.filter((c) => c.mp4Url && !c.thumbnailUrl);
+      const missing = force
+        ? clips.filter((c) => c.mp4Url)
+        : clips.filter((c) => c.mp4Url && !c.thumbnailUrl);
 
       if (missing.length === 0) {
         return reply.send({ message: "All clips already have thumbnails", generated: 0 });
