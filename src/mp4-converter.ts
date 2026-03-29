@@ -23,8 +23,24 @@ export interface SegmentInput {
   data: Buffer;
 }
 
+/** Cached logo buffer (fetched once from altacourtside.se) */
+let cachedLogo: Buffer | null = null;
+
+async function fetchLogo(): Promise<Buffer | null> {
+  if (cachedLogo) return cachedLogo;
+  try {
+    const res = await fetch("https://altacourtside.se/icon.png");
+    if (!res.ok) return null;
+    cachedLogo = Buffer.from(await res.arrayBuffer());
+    return cachedLogo;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Extract a single JPEG thumbnail frame from an MP4 buffer.
+ * Extract a single JPEG thumbnail frame from an MP4 buffer,
+ * with an optional logo overlay in the bottom-right corner.
  * @param mp4 - The MP4 file as a Buffer
  * @param offsetFromEnd - Seconds before the end to grab the frame (default: 2)
  * @returns JPEG image buffer
@@ -41,18 +57,11 @@ export async function extractThumbnail(
     const outputPath = join(workDir, "thumb.jpg");
     await writeFile(inputPath, mp4);
 
-    // Probe duration
-    const { stdout } = await execFileAsync(ffmpegPath!, [
-      "-i", inputPath,
-      "-f", "null", "-",
-    ], { timeout: 10_000 }).catch(() => ({ stdout: "" }));
-
-    // Use ffprobe-style: read duration from stderr via ffmpeg
+    // Probe duration via ffmpeg stderr
     const durationResult = await execFileAsync(ffmpegPath!, [
       "-i", inputPath,
       "-hide_banner",
     ], { timeout: 10_000 }).catch((err) => {
-      // ffmpeg prints info to stderr, then exits with error code
       const stderr = (err as { stderr?: string }).stderr || "";
       const match = stderr.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
       if (match) {
@@ -67,14 +76,37 @@ export async function extractThumbnail(
     const duration = "duration" in durationResult ? durationResult.duration : 8;
     const seekTo = Math.max(0, (duration as number) - offsetFromEnd);
 
-    await execFileAsync(ffmpegPath!, [
-      "-y",
-      "-ss", seekTo.toFixed(2),
-      "-i", inputPath,
-      "-frames:v", "1",
-      "-q:v", "4",
-      outputPath,
-    ], { timeout: 10_000 });
+    // Try to fetch logo for overlay
+    const logo = await fetchLogo();
+    const logoPath = join(workDir, "logo.png");
+    if (logo) {
+      await writeFile(logoPath, logo);
+    }
+
+    if (logo) {
+      // Extract frame + overlay logo (scaled to 10% of video width, bottom-right with padding)
+      await execFileAsync(ffmpegPath!, [
+        "-y",
+        "-ss", seekTo.toFixed(2),
+        "-i", inputPath,
+        "-i", logoPath,
+        "-frames:v", "1",
+        "-filter_complex",
+        "[1:v]scale=iw*0.08:-1[logo];[0:v][logo]overlay=W-w-20:H-h-16",
+        "-q:v", "3",
+        outputPath,
+      ], { timeout: 15_000 });
+    } else {
+      // Fallback: plain frame without logo
+      await execFileAsync(ffmpegPath!, [
+        "-y",
+        "-ss", seekTo.toFixed(2),
+        "-i", inputPath,
+        "-frames:v", "1",
+        "-q:v", "3",
+        outputPath,
+      ], { timeout: 10_000 });
+    }
 
     return await readFile(outputPath);
   } finally {
