@@ -24,6 +24,65 @@ export interface SegmentInput {
 }
 
 /**
+ * Extract a single JPEG thumbnail frame from an MP4 buffer.
+ * @param mp4 - The MP4 file as a Buffer
+ * @param offsetFromEnd - Seconds before the end to grab the frame (default: 2)
+ * @returns JPEG image buffer
+ */
+export async function extractThumbnail(
+  mp4: Buffer,
+  offsetFromEnd = 2,
+): Promise<Buffer> {
+  const workDir = join(tmpdir(), `clip-thumb-${crypto.randomUUID().slice(0, 8)}`);
+  await mkdir(workDir, { recursive: true });
+
+  try {
+    const inputPath = join(workDir, "input.mp4");
+    const outputPath = join(workDir, "thumb.jpg");
+    await writeFile(inputPath, mp4);
+
+    // Probe duration
+    const { stdout } = await execFileAsync(ffmpegPath!, [
+      "-i", inputPath,
+      "-f", "null", "-",
+    ], { timeout: 10_000 }).catch(() => ({ stdout: "" }));
+
+    // Use ffprobe-style: read duration from stderr via ffmpeg
+    const durationResult = await execFileAsync(ffmpegPath!, [
+      "-i", inputPath,
+      "-hide_banner",
+    ], { timeout: 10_000 }).catch((err) => {
+      // ffmpeg prints info to stderr, then exits with error code
+      const stderr = (err as { stderr?: string }).stderr || "";
+      const match = stderr.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+      if (match) {
+        const h = parseFloat(match[1]);
+        const m = parseFloat(match[2]);
+        const s = parseFloat(match[3]);
+        return { duration: h * 3600 + m * 60 + s };
+      }
+      return { duration: 0 };
+    });
+
+    const duration = "duration" in durationResult ? durationResult.duration : 8;
+    const seekTo = Math.max(0, (duration as number) - offsetFromEnd);
+
+    await execFileAsync(ffmpegPath!, [
+      "-y",
+      "-ss", seekTo.toFixed(2),
+      "-i", inputPath,
+      "-frames:v", "1",
+      "-q:v", "4",
+      outputPath,
+    ], { timeout: 10_000 });
+
+    return await readFile(outputPath);
+  } finally {
+    await rm(workDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
  * Convert an ordered list of .ts segment buffers into a single MP4 buffer.
  * Uses ffmpeg concat demuxer with -c copy (remux, no re-encoding).
  */

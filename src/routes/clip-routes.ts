@@ -5,7 +5,7 @@ import type { FastifyInstance } from "fastify";
 import { requireApiKey, requireViewerAuth } from "../auth.js";
 import { streamMeta, collectors, clipsByStream, minio } from "../state.js";
 import { createClip } from "../clip-service.js";
-import { convertSegmentsToMp4 } from "../mp4-converter.js";
+import { convertSegmentsToMp4, extractThumbnail } from "../mp4-converter.js";
 
 /** Track last clip time per stream to prevent spam */
 const lastClipTime = new Map<string, number>();
@@ -146,7 +146,7 @@ export default async function clipRoutes(app: FastifyInstance): Promise<void> {
 <meta property="og:type" content="video.other">
 <meta property="og:title" content="${title}">
 <meta property="og:description" content="Se höjdpunkten från matchen.">
-<meta property="og:image" content="https://altacourtside.se/icon.png">
+<meta property="og:image" content="${clip.thumbnailUrl || "https://altacourtside.se/icon.png"}">
 ${videoUrl ? `<meta property="og:video" content="${videoUrl}">
 <meta property="og:video:secure_url" content="${videoUrl}">
 <meta property="og:video:type" content="video/mp4">
@@ -267,6 +267,51 @@ ${redirectTag}
       }
 
       return reply.send({ converted, errors: errors.length > 0 ? errors : undefined });
+    },
+  );
+
+  // POST /api/clips/backfill-thumbnails — Generate thumbnails for clips that have MP4 but no thumbnail
+  app.post(
+    "/api/clips/backfill-thumbnails",
+    async (request, reply) => {
+      if (!requireApiKey(request, reply)) return;
+
+      const clips = await minio.readClipsIndex();
+      const missing = clips.filter((c) => c.mp4Url && !c.thumbnailUrl);
+
+      if (missing.length === 0) {
+        return reply.send({ message: "All clips already have thumbnails", generated: 0 });
+      }
+
+      let generated = 0;
+      const errors: string[] = [];
+
+      for (const clip of missing) {
+        try {
+          // Download the MP4 from MinIO
+          const mp4Key = `clips/${clip.streamId}/${clip.id}.mp4`;
+          const mp4Buffer = await minio.downloadBuffer(mp4Key);
+
+          // Extract thumbnail (2s before end)
+          const thumbBuffer = await extractThumbnail(mp4Buffer, 2);
+          const thumbKey = `clips/${clip.streamId}/${clip.id}.jpg`;
+          await minio.uploadBuffer(thumbKey, thumbBuffer, "image/jpeg");
+
+          clip.thumbnailUrl = minio.clipThumbnailUrl(clip.streamId, clip.id);
+          generated++;
+          request.log.info(`Backfilled thumbnail for clip ${clip.id} (${thumbBuffer.length} bytes)`);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          errors.push(`${clip.id}: ${msg}`);
+          request.log.warn(err, `Failed to backfill thumbnail for clip ${clip.id}`);
+        }
+      }
+
+      if (generated > 0) {
+        await minio.writeClipsIndex(clips);
+      }
+
+      return reply.send({ generated, errors: errors.length > 0 ? errors : undefined });
     },
   );
 }

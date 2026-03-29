@@ -190,6 +190,11 @@ export class MinioClient {
     return `${this.endpoint}/${BUCKET}/clips/${streamId}/${clipId}.mp4`;
   }
 
+  /** Public URL for a highlight clip thumbnail */
+  clipThumbnailUrl(streamId: string, clipId: string): string {
+    return `${this.endpoint}/${BUCKET}/clips/${streamId}/${clipId}.jpg`;
+  }
+
   /** Public URL for a segment in the recordings bucket */
   segmentUrl(key: string): string {
     return `${this.endpoint}/${BUCKET}/${key}`;
