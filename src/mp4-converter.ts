@@ -29,7 +29,7 @@ let cachedLogo: Buffer | null = null;
 async function fetchLogo(): Promise<Buffer | null> {
   if (cachedLogo) return cachedLogo;
   try {
-    const res = await fetch("https://altacourtside.se/icon.png");
+    const res = await fetch("https://altacourtside.se/assets/icon.png");
     if (!res.ok) return null;
     cachedLogo = Buffer.from(await res.arrayBuffer());
     return cachedLogo;
@@ -83,20 +83,30 @@ export async function extractThumbnail(
       await writeFile(logoPath, logo);
     }
 
+    let usedOverlay = false;
     if (logo) {
-      // Extract frame + overlay logo (scaled to 10% of video width, bottom-right with padding)
-      await execFileAsync(ffmpegPath!, [
-        "-y",
-        "-ss", seekTo.toFixed(2),
-        "-i", inputPath,
-        "-i", logoPath,
-        "-frames:v", "1",
-        "-filter_complex",
-        "[1:v]scale=w=100:h=-1[logo];[0:v][logo]overlay=W-w-20:H-h-16",
-        "-q:v", "3",
-        outputPath,
-      ], { timeout: 15_000 });
-    } else {
+      try {
+        // Extract frame + overlay logo (100px wide, bottom-right with padding)
+        await execFileAsync(ffmpegPath!, [
+          "-y",
+          "-ss", seekTo.toFixed(2),
+          "-i", inputPath,
+          "-i", logoPath,
+          "-frames:v", "1",
+          "-filter_complex",
+          "[1:v]scale=100:-1[logo];[0:v][logo]overlay=W-w-20:H-h-16",
+          "-q:v", "3",
+          outputPath,
+        ], { timeout: 15_000 });
+        usedOverlay = true;
+      } catch (overlayErr) {
+        // Log and fall through to plain extraction
+        console.warn("FFmpeg overlay failed, falling back to plain thumbnail:",
+          (overlayErr as { stderr?: string }).stderr || String(overlayErr));
+      }
+    }
+
+    if (!usedOverlay) {
       // Fallback: plain frame without logo
       await execFileAsync(ffmpegPath!, [
         "-y",

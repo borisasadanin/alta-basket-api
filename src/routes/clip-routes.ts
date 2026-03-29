@@ -160,7 +160,7 @@ export default async function clipRoutes(app: FastifyInstance): Promise<void> {
 <meta property="og:type" content="video.other">
 <meta property="og:title" content="${title}">
 <meta property="og:description" content="${description}">
-<meta property="og:image" content="${clip.thumbnailUrl || "https://altacourtside.se/icon.png"}">
+<meta property="og:image" content="${clip.thumbnailUrl || "https://altacourtside.se/assets/icon.png"}">
 ${videoUrl ? `<meta property="og:video" content="${videoUrl}">
 <meta property="og:video:secure_url" content="${videoUrl}">
 <meta property="og:video:type" content="video/mp4">
