@@ -16,7 +16,7 @@ const OSC_RESTREAMER_TENANT = process.env.OSC_RESTREAMER_TENANT || "borispriv";
 const OSC_INSTANCE_NAME = process.env.OSC_INSTANCE_NAME || "restreamerlive";
 const RESTREAMER_URL =
   process.env.RESTREAMER_URL ||
-  `https://${OSC_RESTREAMER_TENANT}-${OSC_INSTANCE_NAME}.datarhei-restreamer.auto.prod.osaas.io`;
+  `https://${OSC_RESTREAMER_TENANT}-${OSC_INSTANCE_NAME}.datarhei-restreamer.auto.prod-se.osaas.io`;
 const RESTREAMER_GRACE_PERIOD_MS = parseInt(
   process.env.RESTREAMER_GRACE_PERIOD_MS || String(60 * 60 * 1000),
   10
